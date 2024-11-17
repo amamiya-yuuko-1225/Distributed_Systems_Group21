@@ -1,0 +1,15 @@
+FROM golang:1.23.3
+
+WORKDIR /server
+
+COPY . /server
+
+RUN cd /server && go build -o server server.go
+
+ENV PORT="20000"
+
+CMD ["sh", "-c", "/server/server -p $PORT"]
+
+EXPOSE $PORT
+
+

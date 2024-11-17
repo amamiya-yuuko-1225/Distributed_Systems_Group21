@@ -1,0 +1,13 @@
+FROM golang:1.23.3
+
+WORKDIR /proxy
+
+COPY . /proxy
+
+RUN cd /proxy && go build -o proxy proxy.go
+
+ENV PORT="30000"
+
+CMD ["sh", "-c", "/proxy/proxy -p $PORT"]
+
+EXPOSE $PORT

@@ -1,0 +1,35 @@
+###
+ # @Author: amamiya-yuuko-1225 1913250675@qq.com
+ # @Date: 2024-11-17 16:03:56
+ # @LastEditors: amamiya-yuuko-1225 1913250675@qq.com
+ # @Description: Mannual test of server
+### 
+1. Start server with random port 20001
+docker run -e PORT="20001" -p 20001:20001  server:v1
+
+2. Test "DELETE" method, return 501 Not Implemented
+curl -X DELETE amamiya-yuuko.ost.sgsnet.se:20001/a.txt -v
+
+3. Test "POST" method with valid file type, successfully upload "a.txt" to server
+echo "sdafadssfds" > a.txt && curl -X POST -d @a.txt amamiya-yuuko.ost.sgsnet.se:20001/a.txt -v && rm a.txt
+
+4. Test "POST" method with invalid file type, return 400 Bad Request
+touch b.mp4 && curl -X POST -d @b.mp4 amamiya-yuuko.ost.sgsnet.se:20001/b.mp4 -v && rm b.mp4
+
+5. Test "Get" method with exsisting file, sucessfully get file content and 200 ok response
+curl amamiya-yuuko.ost.sgsnet.se:20001/a.txt -v 
+
+6. Test "Get" method with invalid file type, return 400 Bad Request
+curl amamiya-yuuko.ost.sgsnet.se:20001/a.mp4 -v
+
+7. Test "Get" method of proxy, get file sucessfully
+curl -X GET amamiya-yuuko.ost.sgsnet.se:20001/a.txt -x amamiya-yuuko.ost.sgsnet.se:30000 -v
+
+8. Test "POST" method of proxy, return 501 Not Implemented
+echo "oijkllkl" > a.txt && curl -X POST -d @a.txt amamiya-yuuko.ost.sgsnet.se:20001/a.txt -x amamiya-yuuko.ost.sgsnet.se:30000 -v && rm a.txt
+
+9 Shutdown server, test "GET" method of proxy, return 502 Bad Gateway
+curl -X GET amamiya-yuuko.ost.sgsnet.se:20001/a.txt -x [proxy_ip]:[proxy_port] -v
+
+10 Demontrate connection count limit for server
+for i in {1..20}; do curl -X GET amamiya-yuuko.ost.sgsnet.se:20001/a.txt & done; wait 

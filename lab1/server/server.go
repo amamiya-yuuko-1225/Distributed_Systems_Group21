@@ -39,32 +39,56 @@ var (
 	}
 	// control the degree of accepted connections
 	connChan = make(chan int, MAX_CONN)
+
+	//reponse when internal error occured
+	internalErrorResponse = &http.Response{
+		Status:     "500 Internal Server Error",
+		StatusCode: http.StatusInternalServerError,
+		Proto:      "HTTP/1.0",
+		ProtoMajor: 1,
+		ProtoMinor: 0,
+		Header:     make(http.Header),
+		Body:       nil,
+	}
+	//reponse when invalid resquest received
+	badReqResponse = &http.Response{
+		Status:     "400 Bad Request",
+		StatusCode: http.StatusBadRequest,
+		Proto:      "HTTP/1.0",
+		ProtoMajor: 1,
+		ProtoMinor: 0,
+		Header:     make(http.Header),
+		Body:       nil,
+	}
 )
+
+/**
+ * @description: add artifial delay to test max number of conn
+ * @return {*}
+ */
+func test_max_conn() {
+	// show the number of connections
+	log.Println("Number of connection", len(connChan))
+	// add artificial delay to demonstrate max number of connections
+	time.Sleep(20 * time.Millisecond)
+}
 
 /**
  * @description: check if the file in "GET" or "POST" method has valid extenstion
  * @param {string} path: path of the file
- * @return {bool, string, *http.Response}:
- * if valid, return true, contentType, nil
- * else, return false, "", 404 Bad Request Response
+ * @return {bool, string}:
+ * if valid, return true, contentType
+ * else, return false, ""
  */
-func check_ext_validity(path string) (bool, string, *http.Response) {
+func check_ext_validity(path string) (bool, string) {
 	ext := filepath.Ext(path)
 
 	//Check if file extension supported
 	contentType, ok := extMap[ext]
 	if !ok {
-		return false, "", &http.Response{
-			Status:     "400 Bad Request",
-			StatusCode: http.StatusBadRequest,
-			Proto:      "HTTP/1.0",
-			ProtoMajor: 1,
-			ProtoMinor: 0,
-			Header:     make(http.Header),
-			Body:       nil,
-		}
+		return false, ""
 	} else {
-		return true, contentType, nil
+		return true, contentType
 	}
 }
 
@@ -72,7 +96,7 @@ func check_ext_validity(path string) (bool, string, *http.Response) {
  * @description: process GET request
  * @param {*http.Request} req
  * @return {*http.Response}:
- * nil: unexpected error; 400 Bad Request for unsupported file extensions
+ * 500 internal error; 400 Bad Request for unsupported file extensions
  * 404 Not Found for missing file; 200 OK
  */
 func process_get_req(req *http.Request) *http.Response {
@@ -81,7 +105,7 @@ func process_get_req(req *http.Request) *http.Response {
 
 	//Check if extension valid. If valid, get contentType; else return
 	//400 Bad Request
-	valid, contentType, badReqResponse := check_ext_validity(path)
+	valid, contentType := check_ext_validity(path)
 	if !valid {
 		return badReqResponse
 	}
@@ -101,8 +125,8 @@ func process_get_req(req *http.Request) *http.Response {
 				Body:       nil,
 			}
 		} else {
-			log.Println(err)
-			return nil
+			log.Println("File open failed: ", err)
+			return internalErrorResponse
 		}
 	}
 	defer file.Close()
@@ -110,8 +134,8 @@ func process_get_req(req *http.Request) *http.Response {
 	//Read target file
 	data, err := io.ReadAll(file)
 	if err != nil {
-		log.Println(err)
-		return nil
+		log.Println("Read file failed: ", err)
+		return internalErrorResponse
 	}
 
 	// Request successfully handled
@@ -131,7 +155,7 @@ func process_get_req(req *http.Request) *http.Response {
 /**
  * @description: process POST request
  * @param {*http.Request} req
- * @return {*http.Response} nil: unexpected error; 200 OK
+ * @return {*http.Response} 501 internal error; 201 Created
  */
 func process_post_req(req *http.Request) *http.Response {
 	//Open requst body
@@ -142,7 +166,7 @@ func process_post_req(req *http.Request) *http.Response {
 	path := req.URL.Path
 
 	//Check if extension valid. If not valid return 400 Bad Request
-	valid, _, badReqResponse := check_ext_validity(path)
+	valid, _ := check_ext_validity(path)
 	if !valid {
 		return badReqResponse
 	}
@@ -150,26 +174,68 @@ func process_post_req(req *http.Request) *http.Response {
 	//Create an empty file for the target
 	outFile, err := os.Create(FILE_DIR + path)
 	if err != nil {
-		log.Println(err)
-		return nil
+		log.Println("File creation failed: ", err)
+		return internalErrorResponse
 	}
 	defer outFile.Close()
 
 	//Write request body to target file
 	if _, err := io.Copy(outFile, reqBody); err != nil {
-		log.Println(err)
-		return nil
+		log.Println("Failed to write request body to target file: ", err)
+		return internalErrorResponse
 	}
 
-	// Request successfully handled
+	// POST successfully handled, resource created
 	return &http.Response{
-		Status:     "200 OK",
-		StatusCode: http.StatusOK,
+		Status:     "201 Created",
+		StatusCode: http.StatusCreated,
 		Proto:      "HTTP/1.0",
 		ProtoMajor: 1,
 		ProtoMinor: 0,
 		Header:     make(http.Header),
 		Body:       nil,
+	}
+}
+
+/**
+ * @description: generate response for specified conn
+ * @param {net.Conn} conn
+ * @return {*http.Response}
+ */
+func generate_response(conn net.Conn) *http.Response {
+	// input buffer
+	buf := make([]byte, 1024)
+	_, err := conn.Read(buf) // read from connection
+	if err != nil {
+		log.Println("Read from conn failed: ", err)
+		return internalErrorResponse
+	}
+	// conver byte[] to bufio.reader
+	reader := bufio.NewReader(strings.NewReader(string(buf)))
+	// parse request
+	req, err := http.ReadRequest(reader)
+	if err != nil {
+		log.Println("Read request failed: ", err)
+		return internalErrorResponse
+	}
+
+	// Only handle "GET" & "POST" request
+	// Otherwise respond "501 Not Implemented"
+	switch req.Method {
+	case "GET":
+		return process_get_req(req)
+	case "POST":
+		return process_post_req(req)
+	default:
+		return &http.Response{
+			Status:     "501 Not Implemented",
+			StatusCode: http.StatusNotImplemented,
+			Proto:      "HTTP/1.0",
+			ProtoMajor: 1,
+			ProtoMinor: 0,
+			Header:     make(http.Header),
+			Body:       nil,
+		}
 	}
 }
 
@@ -182,64 +248,20 @@ func process_conn(conn net.Conn) {
 	// to limit the number of connections using channel
 	// if channel if full, the goroutine will be blocked
 	connChan <- 1
-	// show the number of connections
-	log.Println("Number of connection", len(connChan))
-	// add artificial delay to demonstrate max number of connections
-	time.Sleep(20 * time.Millisecond)
+
+	// add artifial delay to test max number of conn
+	// FOR DEMO ONLY
+	test_max_conn()
+
+	// Decrement the connection count when done
 	defer func() { <-connChan }()
 
 	defer conn.Close() // close connection before exit
-	// input buffer
-	buf := make([]byte, 1024)
-	_, err := conn.Read(buf) // read from connection
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	// conver byte[] to bufio.reader
-	reader := bufio.NewReader(strings.NewReader(string(buf)))
-	// parse request
-	req, err := http.ReadRequest(reader)
-	if err != nil {
-		log.Println(err)
-		return
-	}
 
-	var response *http.Response = nil
-	// Only handle "GET" & "POST" request
-	// Otherwise respond "501 Not Implemented"
-	switch req.Method {
-	case "GET":
-		response = process_get_req(req)
-	case "POST":
-		response = process_post_req(req)
-	default:
-		response = &http.Response{
-			Status:     "501 Not Implemented",
-			StatusCode: http.StatusNotImplemented,
-			Proto:      "HTTP/1.0",
-			ProtoMajor: 1,
-			ProtoMinor: 0,
-			Header:     make(http.Header),
-			Body:       nil,
-		}
-	}
-	// Unexpected error ocurred when processing request
-	if response == nil {
-		log.Println(err)
-		response = &http.Response{
-			Status:     "500 Internal Server Error",
-			StatusCode: http.StatusInternalServerError,
-			Proto:      "HTTP/1.0",
-			ProtoMajor: 1,
-			ProtoMinor: 0,
-			Header:     make(http.Header),
-			Body:       nil,
-		}
-	}
-	err = response.Write(conn)
+	//generate response, and write it to conn
+	err := generate_response(conn).Write(conn)
 	if err != nil {
-		log.Println(err)
+		log.Println("Write to conn failed: ", err)
 	}
 
 }
@@ -253,7 +275,7 @@ func main() {
 	//Open listing socket
 	listen, err := net.Listen("tcp", ":"+*port)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("FATAL: Listening failed: ", err)
 		return
 	}
 	defer listen.Close()
@@ -262,7 +284,7 @@ func main() {
 	for {
 		conn, err := listen.Accept() // Establish tcp connection
 		if err != nil {
-			log.Println(err)
+			log.Println("Accept new conn failed, skip this conn: ", err)
 			continue
 		}
 		go process_conn(conn) // Create new connection socket in a new goroutine

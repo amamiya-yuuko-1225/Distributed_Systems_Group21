@@ -21,16 +21,28 @@ const MAX_CONN = 10 // Define the maximum number of concurrent connections
 var connChan = make(chan int, MAX_CONN)
 
 /**
+ * @description: add artifial delay to test max number of conn
+ * @return {*}
+ */
+func test_max_conn() {
+	// show the number of connections
+	log.Println("Number of connection", len(connChan))
+	// add artificial delay to demonstrate max number of connections
+	time.Sleep(20 * time.Millisecond)
+}
+
+/**
  * @description: Handles proxying requests from client to remote server and relaying the response.
  * @param {net.Conn} conn: TCP connection with the client.
  */
 func handleProxyConnection(conn net.Conn) {
 	// Increment the connection count by sending a signal to the channel
 	connChan <- 1
-	// show the number of connections
-	log.Println("Number of connection", len(connChan))
-	// add artificial delay to demonstrate max number of connections
-	time.Sleep(20 * time.Millisecond)
+
+	// add artifial delay to test max number of conn
+	// FOR DEMO ONLY
+	test_max_conn()
+
 	defer func() { <-connChan }() // Decrement the connection count when done
 	defer conn.Close()            // Ensure the connection is closed when function exits
 

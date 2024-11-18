@@ -20,6 +20,17 @@ const MAX_CONN = 10 // Define the maximum number of concurrent connections
 // connChan is a buffered channel used to limit the number of concurrent connections
 var connChan = make(chan int, MAX_CONN)
 
+// when unexpected error occured, return 500 internal error
+var internalErrorResponse = &http.Response{
+	Status:     "500 Internal Server Error",
+	StatusCode: http.StatusInternalServerError,
+	Proto:      "HTTP/1.0",
+	ProtoMajor: 1,
+	ProtoMinor: 0,
+	Header:     make(http.Header),
+	Body:       nil,
+}
+
 /**
  * @description: add artifial delay to test max number of conn
  * @return {*}
@@ -52,6 +63,7 @@ func handleProxyConnection(conn net.Conn) {
 	if err != nil {
 		// Log and return if an error occurs while reading the data
 		log.Println("Error reading from connection:", err)
+		internalErrorResponse.Write(conn)
 		return
 	}
 
@@ -61,6 +73,7 @@ func handleProxyConnection(conn net.Conn) {
 	if err != nil {
 		// Log and return if there's an error parsing the request
 		log.Println("Error parsing request:", err)
+		internalErrorResponse.Write(conn)
 		return
 	}
 
@@ -106,6 +119,7 @@ func handleProxyConnection(conn net.Conn) {
 	if err != nil {
 		// Log and return if an error occurs while sending the request to the target server
 		log.Println("Error forwarding request to target server:", err)
+		internalErrorResponse.Write(conn)
 		return
 	}
 
@@ -114,6 +128,7 @@ func handleProxyConnection(conn net.Conn) {
 	if err != nil {
 		// Log and return if an error occurs while reading the response from the target server
 		log.Println("Error reading response from target server:", err)
+		internalErrorResponse.Write(conn)
 		return
 	}
 

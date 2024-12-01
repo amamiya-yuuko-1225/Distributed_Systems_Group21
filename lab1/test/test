@@ -26,13 +26,13 @@ curl amamiya-yuuko.ost.sgsnet.se:20001/asdikfjh.txt -v
 curl amamiya-yuuko.ost.sgsnet.se:20001/a.mp4 -v
 
 7. Test "Get" method of proxy, get file sucessfully
-curl -X GET amamiya-yuuko.ost.sgsnet.se:20001/a.txt -x []:30000 -v
+curl -X GET amamiya-yuuko.ost.sgsnet.se:20001/a.txt -x 98.83.26.48:30000 -v
 
 8. Test "POST" method of proxy, return 501 Not Implemented
-echo "oijkllkl" > a.txt && curl -X POST -d @a.txt amamiya-yuuko.ost.sgsnet.se:20001/a.txt -x amamiya-yuuko.ost.sgsnet.se:30000 -v && rm a.txt
+echo "oijkllkl" > a.txt && curl -X POST -d @a.txt amamiya-yuuko.ost.sgsnet.se:20001/a.txt -x 98.83.26.48:30000 -v && rm a.txt
 
 9 Shutdown server, test "GET" method of proxy, return 502 Bad Gateway
-curl -X GET amamiya-yuuko.ost.sgsnet.se:20001/a.txt -x []:30000 -v
+curl -X GET amamiya-yuuko.ost.sgsnet.se:20001/a.txt -x 98.83.26.48:30000 -v
 
 10 Demontrate connection count limit for server
 for i in {1..20}; do curl -X GET amamiya-yuuko.ost.sgsnet.se:20001/a.txt & done; wait 

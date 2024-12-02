@@ -57,17 +57,24 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			args = TaskRequest{WorkerState: ReduceFinished, WorkerId: workerId, ReduceId: reply.ReduceId}
 		}
 		ok := call("Coordinator.AllocateTasks", &args, &reply)
-		// Coordinator failure deteced through the return value of RPC
+		// Coordinator failure deteced through the return of RPC
 		if !ok {
 			log.Fatal("Coordinator failure detected, exiting...")
 		}
 	}
 }
 
+/**
+ * @description: execute map task.
+ * @param {string} filename: filename of the map task
+ * @param {func} mapf: real map function
+ * @param {int} mapId: the id of map task. Associated with file.
+ * @param {int} nReduce: number of reduce tasks
+ * @return {*}
+ */
 func execMap(filename string, mapf func(string, string) []KeyValue, mapId int, nReduce int) {
 	log.Printf("map %d starts", mapId)
-	// open file.
-	//TODO: convert to file passing using RPC or other method
+	// open original file.
 	file, err := os.Open(filename)
 	if err != nil {
 		log.Fatalf("cannot open %v", filename)
@@ -85,7 +92,7 @@ func execMap(filename string, mapf func(string, string) []KeyValue, mapId int, n
 	intermediateFiles := make([]*os.File, nReduce)
 	encoders := make([]*json.Encoder, nReduce)
 	for i := 0; i < nReduce; i++ {
-		// map output: mr-mapID(1to1 with file nameTemp)-reduceID
+		// create temp files, in order to prevent corrupt data being fetched
 		nameTemp := fmt.Sprintf("mr-%d-%d_", mapId, i)
 		intermediateFiles[i], err = os.Create(nameTemp)
 		if err != nil {
@@ -93,7 +100,7 @@ func execMap(filename string, mapf func(string, string) []KeyValue, mapId int, n
 		}
 		encoders[i] = json.NewEncoder(intermediateFiles[i])
 	}
-	// iterate all KVs
+	// iterate all KVs, write to temp files
 	for _, kv := range kvs {
 		// allocate reducer Hash(key)
 		reduceId := ihash(kv.Key) % nReduce
@@ -104,20 +111,30 @@ func execMap(filename string, mapf func(string, string) []KeyValue, mapId int, n
 		}
 
 	}
-
+	// move temp files to final map output files
 	for _, tempFile := range intermediateFiles {
 		nameTemp := tempFile.Name()
 		name := nameTemp[:len(nameTemp)-1]
-		os.Rename(nameTemp, name)
+		if fileExists(name) {
+			os.Remove(nameTemp)
+		} else {
+			os.Rename(nameTemp, name)
+		}
 	}
 	log.Printf("map %d done", mapId)
 }
 
+/**
+ * @description: execute reduce task
+ * @param {int} reduceId: id of reduce task
+ * @param {func} reducef: real reduce function
+ * @param {int} nMap: number of files(map tasks)
+ * @return {*}
+ */
 func execReduce(reduceId int, reducef func(string, []string) string, nMap int) {
 	log.Printf("reduce %d starts", reduceId)
 	// read all JSON files with specific reduceID
 	// and convert them into KV[]
-	// TODO: passing files on Internet
 	intermediate := []KeyValue{}
 	for i := 0; i < nMap; i++ {
 		name := fmt.Sprintf("mr-%d-%d", i, reduceId)
@@ -140,12 +157,12 @@ func execReduce(reduceId int, reducef func(string, []string) string, nMap int) {
 		file.Close()
 	}
 
-	// Shuffling/Grouping stage
-	// First, sort all KVs by keys
-	sort.Sort(ByKey(intermediate))
-	//reduce output: mr-out-reduceID
-	oname := fmt.Sprintf("mr-out-%d.txt", reduceId)
+	//temp reduce output
+	oname := fmt.Sprintf("mr-out-%d.txt_", reduceId)
 	ofile, _ := os.Create(oname)
+
+	// Shuffling/Grouping
+	sort.Sort(ByKey(intermediate))
 
 	//Group all KVs with a same key, and pass to reduce function
 	i := 0
@@ -161,10 +178,19 @@ func execReduce(reduceId int, reducef func(string, []string) string, nMap int) {
 		}
 		// do reduce task
 		output := reducef(intermediate[i].Key, values)
-		// write to output file
+		// write to temp output file
 		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
 		i = j
 	}
+	// move temp file to final output file
+	nameTemp := oname
+	name := nameTemp[:len(nameTemp)-1]
+	if fileExists(name) {
+		os.Remove(nameTemp)
+	} else {
+		os.Rename(nameTemp, name)
+	}
+
 	log.Printf("reduce %d done", reduceId)
 }
 

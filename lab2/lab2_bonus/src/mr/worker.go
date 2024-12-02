@@ -51,7 +51,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			return
 		}
 		if reply.TaskType == "idle" {
-			time.Sleep(20 * time.Millisecond) // avoid flooding the coordinator
+			time.Sleep(200 * time.Millisecond) // avoid flooding the coordinator
 			args = TaskRequest{WorkerState: Idle, WorkerId: workerId}
 		} else if reply.TaskType == "map" {
 			execMap(reply.FileName, mapf, reply.MapId, reply.NReduce)
@@ -63,12 +63,13 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 		ok := call("Coordinator.AllocateTasks", &args, &reply)
 		// Coordinator failure deteced through the return value of RPC
 		if !ok {
-			log.Fatal("Coordinator failure detected, exiting...")
+			log.Fatal("Coordinator failure: allocate task failed, exiting...")
 		}
 	}
 }
 
 func execMap(filename string, mapf func(string, string) []KeyValue, mapId int, nReduce int) {
+	log.Printf("map %d starts", mapId)
 	// open file and read its content
 	file, err := os.Open(filename)
 	if err != nil {
@@ -100,7 +101,7 @@ func execMap(filename string, mapf func(string, string) []KeyValue, mapId int, n
 		reply := SendFileReply{}
 		ok := call("Coordinator.ReceiveMapOutput", &args, &reply)
 		if !ok || !reply.Success {
-			log.Fatalf("failed to send map output for reduce %d", i)
+			log.Fatalf("Coordinator failure: failed to send map output for reduce %d", i)
 		}
 	}
 }
@@ -117,7 +118,7 @@ func execReduce(reduceId int, reducef func(string, []string) string, nMap int) {
 		reply := TaskResponse{}
 		ok := call("Coordinator.FetchReduceInput", &args, &reply)
 		if !ok {
-			log.Fatalf("failed to fetch reduce input for reduce %d", reduceId)
+			log.Fatalf("Coordinator failure: failed to fetch reduce input for reduce %d", reduceId)
 		}
 		data := deserializeKeyValue(reply.Data) // deserialize keyValue
 		intermediate = append(intermediate, data...)
@@ -129,7 +130,7 @@ func execReduce(reduceId int, reducef func(string, []string) string, nMap int) {
 	// open file
 	oname := fmt.Sprintf("mr-out-%d.txt", reduceId)
 	ofile, _ := os.Create(oname)
-
+	log.Printf("output %s", oname)
 	// Group the data and call the reduce function to process it
 	i := 0
 	for i < len(intermediate) {
@@ -164,7 +165,7 @@ func deserializeKeyValue(data []byte) []KeyValue {
 // send hearbeat
 func sendHeartbeat(workerId int) {
 	for {
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 		args := HeartRequest{WorkerId: workerId}
 		reply := HeartReply{}
 		call("Coordinator.ReceiveHeartbeat", &args, &reply)

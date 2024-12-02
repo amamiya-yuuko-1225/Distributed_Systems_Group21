@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -61,7 +62,7 @@ func (c *Coordinator) server() {
 func (c *Coordinator) Done() bool {
 	if c.reduceFinished {
 		// wait same time for propagating the finished info to all workers
-		time.Sleep(1000 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 		return true
 	}
 	return false
@@ -85,7 +86,7 @@ func (c *Coordinator) AllocateTasks(args *TaskRequest, reply *TaskResponse) erro
 	}
 	// if worker is idle
 	if args.WorkerState == Idle {
-		// if still have map tasks:
+		// if still have map tasks to be allocated:
 		if len(c.mapCh) > 0 {
 			// get task from mapCh
 			task := <-c.mapCh
@@ -102,14 +103,14 @@ func (c *Coordinator) AllocateTasks(args *TaskRequest, reply *TaskResponse) erro
 			go func(mapID int, filename string, workerId int) {
 				time.Sleep(10 * time.Second)
 				c.mutex.Lock()
-				if c.mapState[filename] != Finished {
+				if c.mapState[filename] != Finished || !fileExists(fmt.Sprintf("mr-%d-%d", mapID, 0)) {
 					c.mapCh <- MapTask{mapID, filename}
 					c.mapState[filename] = UnAllocated
 					delete(c.workerTasks, workerId)
 				}
 				c.mutex.Unlock()
 			}(task.MapId, filename, workerId)
-		} else if len(c.reduceCh) != 0 && c.mapFinished {
+		} else if len(c.reduceCh) > 0 && c.mapFinished {
 			// if map is done, do reduce tasks:
 			reduceId := <-c.reduceCh
 			c.reduceState[reduceId] = Allocated
@@ -120,7 +121,7 @@ func (c *Coordinator) AllocateTasks(args *TaskRequest, reply *TaskResponse) erro
 			go func(reduceId int, workerId int) {
 				time.Sleep(10 * time.Second)
 				c.mutex.Lock()
-				if c.reduceState[reduceId] != Finished {
+				if c.reduceState[reduceId] != Finished || !fileExists(fmt.Sprintf("mr-out-%d.txt", reduceId)) {
 					id := reduceId
 					c.reduceCh <- id
 					c.reduceState[id] = UnAllocated
@@ -136,6 +137,7 @@ func (c *Coordinator) AllocateTasks(args *TaskRequest, reply *TaskResponse) erro
 		if checkMapTaskAllDone(c) {
 			c.mapFinished = true
 		}
+		// ask the worker to idle
 		reply.TaskType = "idle"
 		delete(c.workerTasks, workerId) // delete worker task record
 	} else if args.WorkerState == ReduceFinished {
@@ -191,8 +193,15 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 // iterate all map tasks, chekc if all done
 func checkMapTaskAllDone(c *Coordinator) bool {
+	// check state
 	for _, state := range c.mapState {
 		if state != Finished {
+			return false
+		}
+	}
+	// for robustness, check if map output files are present
+	for i := 0; i < c.mapCount; i++ {
+		if !fileExists(fmt.Sprintf("mr-%d-%d", i, 0)) {
 			return false
 		}
 	}
@@ -206,5 +215,15 @@ func checkReduceTaskAllDone(c *Coordinator) bool {
 			return false
 		}
 	}
+	for i := 0; i < c.nReduce; i++ {
+		if !fileExists(fmt.Sprintf("mr-out-%d.txt", i)) {
+			return false
+		}
+	}
 	return true
+}
+
+func fileExists(filePath string) bool {
+	_, err := os.Stat(filePath)
+	return !os.IsNotExist(err)
 }

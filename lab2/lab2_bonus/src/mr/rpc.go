@@ -24,7 +24,8 @@ const (
 )
 
 type RegisterArgs struct {
-	WorkerId int
+	WorkerId   int
+	WorkerDest string
 }
 
 type RegisterReply struct {
@@ -47,14 +48,15 @@ type TaskRequest struct {
 }
 
 type TaskResponse struct {
-	TaskType string
-	FileName string
-	ReduceId int
-	MapId    int
-	MapCount int
-	NReduce  int
-	AllDone  bool
-	Data     []byte // add Data
+	TaskType      string
+	FileName      string
+	ReduceId      int
+	MapId         int
+	MapCount      int
+	NReduce       int
+	AllDone       bool
+	Data          []byte // add Data
+	MapOutputDest map[int]string
 }
 
 // Add your RPC definitions here.
@@ -74,7 +76,7 @@ type FetchReduceInputArgs struct {
 }
 
 type FetchReduceInputReply struct {
-	Data []byte
+	Data []KeyValue
 }
 
 // Cook up a unique-ish UNIX-domain socket name

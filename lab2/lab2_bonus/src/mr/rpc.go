@@ -1,3 +1,9 @@
+/*
+ * @Author: amamiya-yuuko-1225 1913250675@qq.com
+ * @Date: 2024-12-02 13:01:36
+ * @LastEditors: amamiya-yuuko-1225 1913250675@qq.com
+ * @Description:
+ */
 package mr
 
 //
@@ -37,6 +43,7 @@ type TaskRequest struct {
 	WorkerId    int
 	FileName    string
 	ReduceId    int
+	MapId       int // add MapId
 }
 
 type TaskResponse struct {
@@ -47,9 +54,28 @@ type TaskResponse struct {
 	MapCount int
 	NReduce  int
 	AllDone  bool
+	Data     []byte // add Data
 }
 
 // Add your RPC definitions here.
+type SendFileArgs struct {
+	MapId    int
+	ReduceId int
+	Data     []byte
+}
+
+type SendFileReply struct {
+	Success bool
+}
+
+type FetchReduceInputArgs struct {
+	ReduceId int
+	MapId    int
+}
+
+type FetchReduceInputReply struct {
+	Data []byte
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.

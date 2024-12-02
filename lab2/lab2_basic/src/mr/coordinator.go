@@ -29,19 +29,17 @@ const (
 )
 
 type Coordinator struct {
-	mapState         map[string]int    // state of map[filename]
-	reduceState      map[int]int       // state of reduce[id]
-	mapCh            chan MapTask      // map task channel
-	reduceCh         chan int          //reduce task channel
-	nReduce          int               // number of reduce as defined in the paper
-	mapFinished      bool              // indicates if all map tasks done
-	reduceFinished   bool              // indicates if all reduce tasks done
-	workerHeartbeats map[int]time.Time // store last heartbeat time for workers
-	workerTasks      map[int]TaskInfo  // store worker task info
-	workerCounter    int               // count the number of workers
-	mapCount         int               // map task count, equals number of files
-	mutex            sync.Mutex        //atomicity for coordinator access
-	hearbeatChecking map[int]bool      // whether workerID is under heartbeat checking (doing map/reduce job)
+	mapState       map[string]int   // state of map[filename]
+	reduceState    map[int]int      // state of reduce[id]
+	mapCh          chan MapTask     // map task channel
+	reduceCh       chan int         //reduce task channel
+	nReduce        int              // number of reduce as defined in the paper
+	mapFinished    bool             // indicates if all map tasks done
+	reduceFinished bool             // indicates if all reduce tasks done
+	workerTasks    map[int]TaskInfo // store worker task info
+	workerCounter  int              // count the number of workers
+	mapCount       int              // map task count, equals number of files
+	mutex          sync.Mutex       //atomicity for coordinator access
 }
 
 // start a thread that listens for RPCs from worker.go
@@ -61,7 +59,12 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	return c.reduceFinished
+	if c.reduceFinished {
+		// wait same time for propagating the finished info to all workers
+		time.Sleep(1000 * time.Millisecond)
+		return true
+	}
+	return false
 }
 
 /**
@@ -77,7 +80,6 @@ func (c *Coordinator) AllocateTasks(args *TaskRequest, reply *TaskResponse) erro
 	defer c.mutex.Unlock()
 	// if all done, notify worker to exit
 	if c.reduceFinished {
-		c.hearbeatChecking[workerId] = false
 		reply.AllDone = true
 		return nil
 	}
@@ -96,9 +98,17 @@ func (c *Coordinator) AllocateTasks(args *TaskRequest, reply *TaskResponse) erro
 			reply.MapId = task.MapId
 			//record worker task in coordinator
 			c.workerTasks[workerId] = TaskInfo{"map", filename, task.MapId}
-			//check heartbeat
-			c.hearbeatChecking[workerId] = true
-			go c.checkHeartBeat(workerId)
+			// check living every 10s
+			go func(mapID int, filename string, workerId int) {
+				time.Sleep(10 * time.Second)
+				c.mutex.Lock()
+				if c.mapState[filename] != Finished {
+					c.mapCh <- MapTask{mapID, filename}
+					c.mapState[filename] = UnAllocated
+					delete(c.workerTasks, workerId)
+				}
+				c.mutex.Unlock()
+			}(task.MapId, filename, workerId)
 		} else if len(c.reduceCh) != 0 && c.mapFinished {
 			// if map is done, do reduce tasks:
 			reduceId := <-c.reduceCh
@@ -107,8 +117,17 @@ func (c *Coordinator) AllocateTasks(args *TaskRequest, reply *TaskResponse) erro
 			reply.ReduceId = reduceId
 			reply.MapCount = c.mapCount
 			c.workerTasks[workerId] = TaskInfo{"reduce", "", reduceId}
-			c.hearbeatChecking[workerId] = true
-			go c.checkHeartBeat(workerId)
+			go func(reduceId int, workerId int) {
+				time.Sleep(10 * time.Second)
+				c.mutex.Lock()
+				if c.reduceState[reduceId] != Finished {
+					id := reduceId
+					c.reduceCh <- id
+					c.reduceState[id] = UnAllocated
+					delete(c.workerTasks, workerId)
+				}
+				c.mutex.Unlock()
+			}(reduceId, workerId)
 		}
 	} else if args.WorkerState == MapFinished {
 		// label the specific map task as done
@@ -117,66 +136,16 @@ func (c *Coordinator) AllocateTasks(args *TaskRequest, reply *TaskResponse) erro
 		if checkMapTaskAllDone(c) {
 			c.mapFinished = true
 		}
-		// change worker to "idle", stop checking heartbeat
 		reply.TaskType = "idle"
-		c.hearbeatChecking[workerId] = false
+		delete(c.workerTasks, workerId) // delete worker task record
 	} else if args.WorkerState == ReduceFinished {
 		c.reduceState[args.ReduceId] = Finished
 		if checkReduceTaskAllDone(c) {
 			c.reduceFinished = true
 		}
 		reply.TaskType = "idle"
-		c.hearbeatChecking[workerId] = false
+		delete(c.workerTasks, workerId) // delete worker task record
 	}
-	return nil
-}
-
-/**
- * @description: Check heartbeat of worker. If a worker is dead (not responded in 10s)
- * 					then reallocate the ongoing task to other workers
- * @param {int} workerId
- * @return {*}
- */
-func (c *Coordinator) checkHeartBeat(workerId int) {
-	for {
-		// if worker turned to "idle", stop checking heartbeat
-		if !c.hearbeatChecking[workerId] {
-			return
-		}
-		//check heartbeat for every interval
-		time.Sleep(20 * time.Millisecond)
-		c.mutex.Lock()
-		now := time.Now()
-		if lastHeartbeat, ok := c.workerHeartbeats[workerId]; ok {
-			// if last heartbeat is older than 10s:
-			if now.Sub(lastHeartbeat) > 10*time.Second {
-				//delete worker heartbeat record
-				delete(c.workerHeartbeats, workerId)
-				// reallocate task
-				if taskInfo, ok := c.workerTasks[workerId]; ok {
-					if taskInfo.TaskType == "map" && c.mapState[taskInfo.Value] != Finished {
-						c.mapCh <- MapTask{taskInfo.ID, taskInfo.Value}
-						c.mapState[taskInfo.Value] = UnAllocated
-					} else if taskInfo.TaskType == "reduce" && c.reduceState[taskInfo.ID] != Finished {
-						id := taskInfo.ID
-						c.reduceCh <- id
-						c.reduceState[id] = UnAllocated
-					}
-					delete(c.workerTasks, workerId) // delete worker task record
-				}
-			}
-		}
-		c.mutex.Unlock()
-	}
-
-}
-
-func (c *Coordinator) ReceiveHeartbeat(arg *HeartRequest, reply *HeartReply) error {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	now := time.Now()
-	id := arg.WorkerId
-	c.workerHeartbeats[id] = now
 	return nil
 }
 
@@ -186,7 +155,6 @@ func (c *Coordinator) RegisterWorker(args *RegisterArgs, reply *RegisterReply) e
 	c.workerCounter++
 	workerId := c.workerCounter
 	reply.WorkerId = workerId
-	c.workerHeartbeats[workerId] = time.Now()
 	return nil
 }
 
@@ -195,17 +163,15 @@ func (c *Coordinator) RegisterWorker(args *RegisterArgs, reply *RegisterReply) e
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
-		mapState:         make(map[string]int),
-		reduceState:      make(map[int]int),
-		mapCh:            make(chan MapTask, len(files)+5),
-		reduceCh:         make(chan int, nReduce+5),
-		workerHeartbeats: make(map[int]time.Time),
-		nReduce:          nReduce,
-		workerTasks:      make(map[int]TaskInfo),
-		mapFinished:      false,
-		reduceFinished:   false,
-		mutex:            sync.Mutex{},
-		hearbeatChecking: make(map[int]bool),
+		mapState:       make(map[string]int),
+		reduceState:    make(map[int]int),
+		mapCh:          make(chan MapTask, len(files)+5),
+		reduceCh:       make(chan int, nReduce+5),
+		nReduce:        nReduce,
+		workerTasks:    make(map[int]TaskInfo),
+		mapFinished:    false,
+		reduceFinished: false,
+		mutex:          sync.Mutex{},
 	}
 	// add files, create related map tasks
 	for i, filename := range files {

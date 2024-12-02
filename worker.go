@@ -49,12 +49,12 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			return
 		}
 		if reply.TaskType == "idle" {
-			// time.Sleep(10 * time.Millisecond) // avoid flooding the coordinator
+			time.Sleep(10 * time.Millisecond) // avoid flooding the coordinator
 			args = TaskRequest{WorkerState: Idle, WorkerId: workerId}
 		} else if reply.TaskType == "map" {
 			execMap(reply.FileName, mapf, reply.MapId, reply.NReduce)
 			args = TaskRequest{WorkerState: MapFinished, WorkerId: workerId, FileName: reply.FileName}
-		} else {
+		} else if reply.TaskType == "reduce" {
 			execReduce(reply.ReduceId, reducef, reply.MapCount)
 			args = TaskRequest{WorkerState: ReduceFinished, WorkerId: workerId, ReduceId: reply.ReduceId}
 		}
@@ -66,9 +66,10 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	}
 }
 
-func execMap(filename string, mapf func(string, string) []KeyValue, mapId int, nReduce int) {
+func execMap(filename string, mapf func(string, string) []KeyValue, mapId int, nReduce int) bool {
 	// open file.
 	//TODO: convert to file passing using RPC or other method
+	log.Printf("map %d starts", mapId)
 	file, err := os.Open(filename)
 	if err != nil {
 		log.Fatalf("cannot open %v", filename)
@@ -78,16 +79,16 @@ func execMap(filename string, mapf func(string, string) []KeyValue, mapId int, n
 		log.Fatalf("cannot read %v", filename)
 	}
 	file.Close()
-
+	log.Printf("map %d a", mapId)
 	// do map task
 	kvs := mapf(filename, string(content))
-
+	log.Printf("map %d b", mapId)
 	//create intermediate JSON files
 	intermediateFiles := make([]*os.File, nReduce)
 	encoders := make([]*json.Encoder, nReduce)
 	for i := 0; i < nReduce; i++ {
 		// map output: mr-mapID(1to1 with file nameTemp)-reduceID
-		nameTemp := fmt.Sprintf("mr-%d-%d", mapId, i)
+		nameTemp := fmt.Sprintf("mr-%d-%d_", mapId, i)
 		intermediateFiles[i], err = os.Create(nameTemp)
 		if err != nil {
 			log.Fatalf("cannot create file %v", nameTemp)
@@ -95,6 +96,7 @@ func execMap(filename string, mapf func(string, string) []KeyValue, mapId int, n
 		encoders[i] = json.NewEncoder(intermediateFiles[i])
 		defer intermediateFiles[i].Close()
 	}
+	log.Printf("map %d c", mapId)
 	// iterate all KVs
 	for _, kv := range kvs {
 		// allocate reducer Hash(key)
@@ -106,15 +108,23 @@ func execMap(filename string, mapf func(string, string) []KeyValue, mapId int, n
 		}
 
 	}
+	log.Printf("map %d d", mapId)
+	for _, tempFile := range intermediateFiles {
+		nameTemp := tempFile.Name()
+		name := nameTemp[:len(nameTemp)-1]
+		if _, err := os.Stat(name); err == nil {
+			os.Remove(nameTemp)
+		} else {
+			os.Rename(nameTemp, name)
+		}
 
-	// for _, tempFile := range intermediateFiles {
-	// 	nameTemp := tempFile.Name()
-	// 	name := nameTemp[:len(nameTemp)-1]
-	// 	os.Rename(nameTemp, name)
-	// }
+	}
+	log.Printf("map %d done", mapId)
+	return true
 }
 
-func execReduce(reduceId int, reducef func(string, []string) string, nMap int) {
+func execReduce(reduceId int, reducef func(string, []string) string, nMap int) bool {
+	log.Printf("reduce %d starts", reduceId)
 	// read all JSON files with specific reduceID
 	// and convert them into KV[]
 	// TODO: passing files on Internet
@@ -144,7 +154,7 @@ func execReduce(reduceId int, reducef func(string, []string) string, nMap int) {
 	// First, sort all KVs by keys
 	sort.Sort(ByKey(intermediate))
 	//reduce output: mr-out-reduceID
-	oname := fmt.Sprintf("mr-out-%d.txt", reduceId)
+	oname := fmt.Sprintf("mr-out-%d.txt_", reduceId)
 	ofile, _ := os.Create(oname)
 
 	//Group all KVs with a same key, and pass to reduce function
@@ -163,8 +173,17 @@ func execReduce(reduceId int, reducef func(string, []string) string, nMap int) {
 		output := reducef(intermediate[i].Key, values)
 		// write to output file
 		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+		nameTemp := oname
+		name := nameTemp[:len(nameTemp)-1]
+		if _, err := os.Stat(name); err == nil {
+			os.Remove(nameTemp)
+		} else {
+			os.Rename(nameTemp, name)
+		}
 		i = j
 	}
+	log.Printf("reduce %d done", reduceId)
+	return true
 }
 
 // send hearbeat

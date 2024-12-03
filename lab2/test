@@ -1,0 +1,17 @@
+###
+ # @Author: amamiya-yuuko-1225 1913250675@qq.com
+ # @Date: 2024-12-03 15:35:07
+ # @LastEditors: amamiya-yuuko-1225 1913250675@qq.com
+ # @Description: 
+### 
+test basic:
+cd ~/ds/lab2/lab2_basic/src/main; bash test-mr.sh
+
+test bonus:
+cd ~/ds/lab2/lab2_bonus/src/main 
+
+go run -race mrcoordinator.go pg-*.txt 
+
+go run -race -gcflags="all=-N -l" mrworker.go wc.so localhost 6640  
+
+go run -race -gcflags="all=-N -l" mrworker.go wc.so localhost 6640  

@@ -87,8 +87,6 @@ func (c *Coordinator) SendReduceOutput2Coordinator(args *SendReduceOutoutArgs, r
 	for k, v := range output {
 		fmt.Fprintf(ofile, "%v %v\n", k, v)
 	}
-
-	log.Printf("output %s", oname)
 	ofile.Close()
 	log.Printf("Final output %d delivered", reduceId)
 	return nil

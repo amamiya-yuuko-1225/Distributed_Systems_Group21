@@ -193,8 +193,9 @@ func execReduce(reduceId int, reducef func(string, []string) string, nMap int, d
 			MapId:    i,
 		}
 		reply := FetchReduceInputReply{}
+		values := []KeyValue{}
 		if dests[i] == myDest {
-			intermediate = readIntermediateFile(fmt.Sprintf("mr-%d-%d", i, reduceId))
+			values = readIntermediateFile(fmt.Sprintf("mr-%d-%d", i, reduceId))
 		} else {
 			log.Printf("%s %s", myDest, dests[i])
 			ok := call("Files.GetintermediateFile", dests[i], &args, &reply)
@@ -202,8 +203,9 @@ func execReduce(reduceId int, reducef func(string, []string) string, nMap int, d
 				log.Printf("Fetch intermediate files failure: mr-%d-%d, abort task", i, reduceId)
 				return false
 			}
-			intermediate = append(intermediate, reply.Data...)
+			values = reply.Data
 		}
+		intermediate = append(intermediate, values...)
 
 	}
 
@@ -280,7 +282,7 @@ func call(rpcname string, dest string, args interface{}, reply interface{}) bool
 	// because while worker A getting files from worker B
 	// the worker B may suddenly dies
 	// then worker A should exit and request task reallocation
-	timeout := time.Duration(5 * time.Second)
+	timeout := time.Duration(50 * time.Millisecond)
 	done := make(chan error, 1)
 	c, err := rpc.DialHTTP("tcp", dest)
 	if err != nil {

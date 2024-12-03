@@ -15,3 +15,7 @@ go run -race mrcoordinator.go pg-*.txt
 go run -race -gcflags="all=-N -l" mrworker.go wc.so localhost 6640  
 
 go run -race -gcflags="all=-N -l" mrworker.go wc.so localhost 6640  
+
+go build -buildmode=plugin ../mrapps/wc.go; go run mrsequential.go wc.so pg*.txt
+
+cat mr-out-* | sort | more

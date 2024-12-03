@@ -2,16 +2,12 @@ package mr
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
-	"io/ioutil"
-	"net"
-
-	//"io"
-	//"io/ioutil"
-	"errors"
 	"log"
+	"net"
 	"net/http"
 	"net/rpc"
 	"os"
@@ -49,11 +45,14 @@ var myDest string
 type Files struct {
 }
 
-// Other workers call this by RPC to get file on this machine
-func (f *Files) GetIntermidiateFile(arg *FetchReduceInputArgs, reply *FetchReduceInputReply) error {
-	name := fmt.Sprintf("mr-%d-%d", arg.MapId, arg.ReduceId)
+/**
+ * @description: read map output file, and return kv
+ * @param {string} name
+ * @return {*} kv pairs
+ */
+func readIntermediateFile(name string) []KeyValue {
 	if !fileExists(name) {
-		return errors.New("file missing")
+		return nil
 	}
 	file, err := os.Open(name)
 	if err != nil {
@@ -72,16 +71,26 @@ func (f *Files) GetIntermidiateFile(arg *FetchReduceInputArgs, reply *FetchReduc
 		}
 		intermediate = append(intermediate, kv)
 	}
-	file.Close()
+	return intermediate
+}
+
+// Other workers call this by RPC to get file on this machine
+func (f *Files) GetintermediateFile(arg *FetchReduceInputArgs, reply *FetchReduceInputReply) error {
+	name := fmt.Sprintf("mr-%d-%d", arg.MapId, arg.ReduceId)
+	intermediate := readIntermediateFile(name)
+	if intermediate == nil {
+		return errors.New("get intermediate file failed")
+	}
 	reply.Data = intermediate
 	return nil
 }
 
 // main/mrworker.go calls this function.
-func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string, url string) {
-	myDest = url
+func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string, ip string, port string) {
+	//register worker rpc server to transmit intermediate files
+	myDest = ip + ":" + port
 	f := Files{}
-	f.server()
+	f.server(port)
 
 	workerId := registerWorker()
 	// send heartbeat to coordinator
@@ -89,6 +98,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	var args TaskRequest
 	reply := TaskResponse{}
 	reply.TaskType = "idle"
+	// ask coordinator for a task
 	for {
 		// if all done, exit
 		if reply.AllDone {
@@ -99,11 +109,17 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			time.Sleep(1000 * time.Millisecond) // avoid flooding the coordinator
 			args = TaskRequest{WorkerState: Idle, WorkerId: workerId}
 		} else if reply.TaskType == "map" {
-			execMap(reply.FileName, mapf, reply.MapId, reply.NReduce)
-			args = TaskRequest{WorkerState: MapFinished, WorkerId: workerId, FileName: reply.FileName}
+			if execMap(reply.FileName, mapf, reply.MapId, reply.NReduce) {
+				args = TaskRequest{WorkerState: MapFinished, WorkerId: workerId, FileName: reply.FileName, MapId: reply.MapId}
+			} else {
+				args = TaskRequest{WorkerState: MapFailed, WorkerId: workerId, FileName: reply.FileName, MapId: reply.MapId}
+			}
 		} else {
-			execReduce(reply.ReduceId, reducef, reply.MapCount, reply.MapOutputDest)
-			args = TaskRequest{WorkerState: ReduceFinished, WorkerId: workerId, ReduceId: reply.ReduceId}
+			if execReduce(reply.ReduceId, reducef, reply.MapCount, reply.MapOutputDest) {
+				args = TaskRequest{WorkerState: ReduceFinished, WorkerId: workerId, ReduceId: reply.ReduceId}
+			} else {
+				args = TaskRequest{WorkerState: ReduceFailed, WorkerId: workerId, ReduceId: reply.ReduceId}
+			}
 		}
 		ok := call("Coordinator.AllocateTasks", coordinatorDest, &args, &reply)
 		// Coordinator failure deteced through the return value of RPC
@@ -113,20 +129,20 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	}
 }
 
-func execMap(filename string, mapf func(string, string) []KeyValue, mapId int, nReduce int) {
+func execMap(filename string, mapf func(string, string) []KeyValue, mapId int, nReduce int) bool {
 	log.Printf("map %d starts", mapId)
-	// open file and read its content
-	file, err := os.Open(filename)
-	if err != nil {
-		log.Fatalf("cannot open %v", filename)
+
+	// Get original file from coordinator
+	args := GetOriginalFileArgs{
+		Filename: filename,
 	}
-	content, err := ioutil.ReadAll(file)
-	if err != nil {
-		log.Fatalf("cannot read %v", filename)
+	reply := GetOriginalFileReply{}
+	ok := call("Coordinator.GetOriginalFile", coordinatorDest, &args, &reply)
+	if !ok {
+		log.Fatalf("get original file %s failed, coordinator failure...", filename)
 	}
-	file.Close()
 	// do map task
-	kvs := mapf(filename, string(content))
+	kvs := mapf(filename, string(reply.Data))
 
 	//create intermediate JSON files
 	intermediateFiles := make([]*os.File, nReduce)
@@ -134,6 +150,7 @@ func execMap(filename string, mapf func(string, string) []KeyValue, mapId int, n
 	for i := 0; i < nReduce; i++ {
 		// create temp files, in order to prevent corrupt data being fetched
 		nameTemp := fmt.Sprintf("mr-%d-%d_", mapId, i)
+		var err error
 		intermediateFiles[i], err = os.Create(nameTemp)
 		if err != nil {
 			log.Fatalf("cannot create file %v", nameTemp)
@@ -162,23 +179,32 @@ func execMap(filename string, mapf func(string, string) []KeyValue, mapId int, n
 		}
 	}
 	log.Printf("map %d done", mapId)
+	return true
 }
 
-func execReduce(reduceId int, reducef func(string, []string) string, nMap int, dests map[int]string) {
+func execReduce(reduceId int, reducef func(string, []string) string, nMap int, dests map[int]string) bool {
+	log.Printf("reduce %d starts", reduceId)
 	// fetch intermediate file from workers through RPC
 	// iterate ALL workers who have done "map" to fetch the needed file
 	intermediate := []KeyValue{}
-	for i := 0; i < nMap; i++ {
+	for i := 1; i <= nMap; i++ {
 		args := FetchReduceInputArgs{
 			ReduceId: reduceId,
 			MapId:    i,
 		}
 		reply := FetchReduceInputReply{}
-		ok := call("Files.GetIntermidiateFile", dests[i], &args, &reply)
-		if !ok {
-			log.Fatalf("Fetch intermidiate files failure: mr-%d-%d", i, reduceId)
+		if dests[i] == myDest {
+			intermediate = readIntermediateFile(fmt.Sprintf("mr-%d-%d", i, reduceId))
+		} else {
+			log.Printf("%s %s", myDest, dests[i])
+			ok := call("Files.GetintermediateFile", dests[i], &args, &reply)
+			if !ok {
+				log.Printf("Fetch intermediate files failure: mr-%d-%d, abort task", i, reduceId)
+				return false
+			}
+			intermediate = append(intermediate, reply.Data...)
 		}
-		intermediate = append(intermediate, reply.Data...)
+
 	}
 
 	// sort by key
@@ -210,8 +236,11 @@ func execReduce(reduceId int, reducef func(string, []string) string, nMap int, d
 	reply := SendReduceOutputReply{}
 	ok := call("Coordinator.SendReduceOutput2Coordinator", coordinatorDest, &args, &reply)
 	if !ok {
-		log.Fatalf("Send reduce %d output to master failed", reduceId)
+		log.Printf("Send reduce %d output to master failed. Abort task", reduceId)
+		return false
 	}
+	log.Printf("reduce %d done", reduceId)
+	return true
 }
 
 // send hearbeat
@@ -220,7 +249,10 @@ func sendHeartbeat(workerId int) {
 		time.Sleep(200 * time.Millisecond)
 		args := HeartRequest{WorkerId: workerId}
 		reply := HeartReply{}
-		call("Coordinator.ReceiveHeartbeat", coordinatorDest, &args, &reply)
+		ok := call("Coordinator.ReceiveHeartbeat", coordinatorDest, &args, &reply)
+		if !ok {
+			log.Fatal("Coordinator failure: allocate task failed, exiting...")
+		}
 	}
 }
 
@@ -244,25 +276,38 @@ func registerWorker() int {
 // usually returns true.
 // returns false if something goes wrong.
 func call(rpcname string, dest string, args interface{}, reply interface{}) bool {
+	// we have timeout here
+	// because while worker A getting files from worker B
+	// the worker B may suddenly dies
+	// then worker A should exit and request task reallocation
+	timeout := time.Duration(5 * time.Second)
+	done := make(chan error, 1)
 	c, err := rpc.DialHTTP("tcp", dest)
 	if err != nil {
-		log.Fatal("dialing:", err)
+		log.Print("dialing:", err)
+		return false
 	}
 	defer c.Close()
-
-	err = c.Call(rpcname, args, reply)
-	if err == nil {
-		return true
+	go func() {
+		err = c.Call(rpcname, args, reply)
+		done <- err
+	}()
+	select {
+	case <-time.After(timeout):
+		log.Printf("rpc call timeout =>%v", dest)
+		return false
+	case err := <-done:
+		if err != nil {
+			return false
+		}
 	}
-
-	fmt.Println(err)
-	return false
+	return true
 }
 
-func (f *Files) server() {
+func (f *Files) server(port string) {
 	rpc.Register(f)
 	rpc.HandleHTTP()
-	l, e := net.Listen("tcp", myDest)
+	l, e := net.Listen("tcp", "0.0.0.0:"+port)
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}

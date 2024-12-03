@@ -26,14 +26,14 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 3 {
-		fmt.Fprintf(os.Stderr, "Usage: mrworker xxx.so URL(worker rpc)\n")
+	if len(os.Args) != 4 {
+		fmt.Fprintf(os.Stderr, "Usage: mrworker xxx.so workerIP workerPORT\n")
 		os.Exit(1)
 	}
 
 	mapf, reducef := loadPlugin(os.Args[1])
 
-	mr.Worker(mapf, reducef, os.Args[2])
+	mr.Worker(mapf, reducef, os.Args[2], os.Args[3])
 }
 
 // load the application Map and Reduce functions

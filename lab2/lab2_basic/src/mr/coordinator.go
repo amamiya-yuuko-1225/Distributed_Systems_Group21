@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -30,17 +29,14 @@ const (
 )
 
 type Coordinator struct {
-	mapState       map[string]int   // state of map[filename]
-	reduceState    map[int]int      // state of reduce[id]
-	mapCh          chan MapTask     // map task channel
-	reduceCh       chan int         //reduce task channel
-	nReduce        int              // number of reduce as defined in the paper
-	mapFinished    bool             // indicates if all map tasks done
-	reduceFinished bool             // indicates if all reduce tasks done
-	workerTasks    map[int]TaskInfo // store worker task info
-	workerCounter  int              // count the number of workers
-	mapCount       int              // map task count, equals number of files
-	mutex          sync.Mutex       //atomicity for coordinator access
+	mapState       map[int]int    // state of map[filename]
+	reduceState    map[int]int    // state of reduce[id]
+	nReduce        int            // number of reduce as defined in the paper
+	reduceFinished bool           // indicates if all reduce tasks done
+	mapId2File     map[int]string //map mapID to filename
+	mapCount       int            // map task count, equals number of files
+	mutex          sync.Mutex     //atomicity for coordinator access
+	workerCounter  int
 }
 
 // start a thread that listens for RPCs from worker.go
@@ -86,67 +82,65 @@ func (c *Coordinator) AllocateTasks(args *TaskRequest, reply *TaskResponse) erro
 	}
 	// if worker is idle
 	if args.WorkerState == Idle {
-		// if still have map tasks to be allocated:
-		if len(c.mapCh) > 0 {
-			// get task from mapCh
-			task := <-c.mapCh
-			filename := task.FileName
-			// change state of the map task
-			c.mapState[filename] = Allocated
-			// fill in reply to the worker
-			reply.TaskType = "map"
-			reply.FileName = filename
-			reply.MapId = task.MapId
-			//record worker task in coordinator
-			c.workerTasks[workerId] = TaskInfo{"map", filename, task.MapId}
-			// check living every 10s
-			go func(mapID int, filename string, workerId int) {
-				time.Sleep(10 * time.Second)
-				c.mutex.Lock()
-				if c.mapState[filename] != Finished || !fileExists(fmt.Sprintf("mr-%d-%d", mapID, 0)) {
-					c.mapCh <- MapTask{mapID, filename}
-					c.mapState[filename] = UnAllocated
-					delete(c.workerTasks, workerId)
-				}
-				c.mutex.Unlock()
-			}(task.MapId, filename, workerId)
-		} else if len(c.reduceCh) > 0 && c.mapFinished {
-			// if map is done, do reduce tasks:
-			reduceId := <-c.reduceCh
-			c.reduceState[reduceId] = Allocated
-			reply.TaskType = "reduce"
-			reply.ReduceId = reduceId
-			reply.MapCount = c.mapCount
-			c.workerTasks[workerId] = TaskInfo{"reduce", "", reduceId}
-			go func(reduceId int, workerId int) {
-				time.Sleep(10 * time.Second)
-				c.mutex.Lock()
-				if c.reduceState[reduceId] != Finished || !fileExists(fmt.Sprintf("mr-out-%d.txt", reduceId)) {
-					id := reduceId
-					c.reduceCh <- id
-					c.reduceState[id] = UnAllocated
-					delete(c.workerTasks, workerId)
-				}
-				c.mutex.Unlock()
-			}(reduceId, workerId)
+		mapFinished := true
+		for mapId, state := range c.mapState {
+			if state != Finished {
+				mapFinished = false
+			}
+			if state == UnAllocated {
+				filename := c.mapId2File[mapId]
+				// change state of the map task
+				c.mapState[mapId] = Allocated
+				// fill in reply to the worker
+				reply.MapId = mapId + 1
+				reply.TaskType = "map"
+				reply.FileName = filename
+				reply.NReduce = c.nReduce
+				//record worker task in coordinator
+				go func(mapID int, workerId int) {
+					time.Sleep(10 * time.Second)
+					c.mutex.Lock()
+					if c.mapState[mapID] != Finished /*|| !fileExists(fmt.Sprintf("mr-%d-%d", mapID, 0)) */ {
+						c.mapState[mapID] = UnAllocated
+					}
+					c.mutex.Unlock()
+				}(mapId, workerId)
+				return nil
+			}
+		}
+		for reduceId, state := range c.reduceState {
+			if !mapFinished {
+				break
+			}
+			if state == UnAllocated {
+				c.reduceState[reduceId] = Allocated
+				reply.TaskType = "reduce"
+				reply.ReduceId = reduceId + 1
+				reply.MapCount = c.mapCount
+				// notify the reduce worker with all the locations of
+				// intermediate files
+				go func(reduceId int, workerId int) {
+					time.Sleep(10 * time.Second)
+					c.mutex.Lock()
+					if c.reduceState[reduceId] != Finished /*|| !fileExists(fmt.Sprintf("mr-out-%d.txt", reduceId)) */ {
+						c.reduceState[reduceId] = UnAllocated
+					}
+					c.mutex.Unlock()
+				}(reduceId, workerId)
+				return nil
+			}
 		}
 	} else if args.WorkerState == MapFinished {
 		// label the specific map task as done
-		c.mapState[args.FileName] = Finished
-		// if all map done, label mapFinished = true
-		if checkMapTaskAllDone(c) {
-			c.mapFinished = true
-		}
+		c.mapState[args.MapId] = Finished
 		// ask the worker to idle
 		reply.TaskType = "idle"
-		delete(c.workerTasks, workerId) // delete worker task record
 	} else if args.WorkerState == ReduceFinished {
 		c.reduceState[args.ReduceId] = Finished
 		if checkReduceTaskAllDone(c) {
 			c.reduceFinished = true
 		}
 		reply.TaskType = "idle"
-		delete(c.workerTasks, workerId) // delete worker task record
 	}
 	return nil
 }
@@ -165,13 +159,10 @@ func (c *Coordinator) RegisterWorker(args *RegisterArgs, reply *RegisterReply) e
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
-		mapState:       make(map[string]int),
+		mapState:       make(map[int]int),
 		reduceState:    make(map[int]int),
-		mapCh:          make(chan MapTask, len(files)+5),
-		reduceCh:       make(chan int, nReduce+5),
 		nReduce:        nReduce,
-		workerTasks:    make(map[int]TaskInfo),
-		mapFinished:    false,
+		mapId2File:     make(map[int]string),
 		reduceFinished: false,
 		mutex:          sync.Mutex{},
 	}
@@ -179,34 +170,33 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	for i, filename := range files {
 		mapId := i
 		c.mapCount++
-		c.mapState[filename] = UnAllocated
-		c.mapCh <- MapTask{FileName: filename, MapId: mapId}
+		c.mapState[mapId] = UnAllocated
+		c.mapId2File[mapId] = filename
 	}
 	// create reducer channel given NReduced
 	for i := 0; i < nReduce; i++ {
 		c.reduceState[i] = UnAllocated
-		c.reduceCh <- i
 	}
 	c.server()
 	return &c
 }
 
 // iterate all map tasks, chekc if all done
-func checkMapTaskAllDone(c *Coordinator) bool {
-	// check state
-	for _, state := range c.mapState {
-		if state != Finished {
-			return false
-		}
-	}
-	// for robustness, check if map output files are present
-	for i := 0; i < c.mapCount; i++ {
-		if !fileExists(fmt.Sprintf("mr-%d-%d", i, 0)) {
-			return false
-		}
-	}
-	return true
-}
+// func checkMapTaskAllDone(c *Coordinator) bool {
+// 	// check state
+// 	for _, state := range c.mapState {
+// 		if state != Finished {
+// 			return false
+// 		}
+// 	}
+// 	// for robustness, check if map output files are present
+// 	for i := 0; i < c.mapCount; i++ {
+// 		if !fileExists(fmt.Sprintf("mr-%d-%d", i, 0)) {
+// 			return false
+// 		}
+// 	}
+// 	return true
+// }
 
 // iterate all reduce tasks, check if all done
 func checkReduceTaskAllDone(c *Coordinator) bool {
@@ -215,11 +205,11 @@ func checkReduceTaskAllDone(c *Coordinator) bool {
 			return false
 		}
 	}
-	for i := 0; i < c.nReduce; i++ {
-		if !fileExists(fmt.Sprintf("mr-out-%d.txt", i)) {
-			return false
-		}
-	}
+	// for i := 0; i < c.nReduce; i++ {
+	// 	if !fileExists(fmt.Sprintf("mr-out-%d.txt", i)) {
+	// 		return false
+	// 	}
+	// }
 	return true
 }
 

@@ -109,16 +109,16 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			time.Sleep(1000 * time.Millisecond) // avoid flooding the coordinator
 			args = TaskRequest{WorkerState: Idle, WorkerId: workerId}
 		} else if reply.TaskType == "map" {
-			if execMap(reply.FileName, mapf, reply.MapId, reply.NReduce) {
-				args = TaskRequest{WorkerState: MapFinished, WorkerId: workerId, FileName: reply.FileName, MapId: reply.MapId}
+			if execMap(reply.FileName, mapf, reply.MapId-1, reply.NReduce) {
+				args = TaskRequest{WorkerState: MapFinished, WorkerId: workerId, FileName: reply.FileName, MapId: reply.MapId - 1}
 			} else {
-				args = TaskRequest{WorkerState: MapFailed, WorkerId: workerId, FileName: reply.FileName, MapId: reply.MapId}
+				args = TaskRequest{WorkerState: MapFailed, WorkerId: workerId, FileName: reply.FileName, MapId: reply.MapId - 1}
 			}
 		} else {
-			if execReduce(reply.ReduceId, reducef, reply.MapCount, reply.MapOutputDest) {
-				args = TaskRequest{WorkerState: ReduceFinished, WorkerId: workerId, ReduceId: reply.ReduceId}
+			if execReduce(reply.ReduceId-1, reducef, reply.MapCount, reply.MapOutputDest) {
+				args = TaskRequest{WorkerState: ReduceFinished, WorkerId: workerId, ReduceId: reply.ReduceId - 1}
 			} else {
-				args = TaskRequest{WorkerState: ReduceFailed, WorkerId: workerId, ReduceId: reply.ReduceId}
+				args = TaskRequest{WorkerState: ReduceFailed, WorkerId: workerId, ReduceId: reply.ReduceId - 1}
 			}
 		}
 		ok := call("Coordinator.AllocateTasks", coordinatorDest, &args, &reply)
@@ -187,7 +187,7 @@ func execReduce(reduceId int, reducef func(string, []string) string, nMap int, d
 	// fetch intermediate file from workers through RPC
 	// iterate ALL workers who have done "map" to fetch the needed file
 	intermediate := []KeyValue{}
-	for i := 1; i <= nMap; i++ {
+	for i := 0; i < nMap; i++ {
 		args := FetchReduceInputArgs{
 			ReduceId: reduceId,
 			MapId:    i,
@@ -282,15 +282,16 @@ func call(rpcname string, dest string, args interface{}, reply interface{}) bool
 	// because while worker A getting files from worker B
 	// the worker B may suddenly dies
 	// then worker A should exit and request task reallocation
-	timeout := time.Duration(50 * time.Millisecond)
+	timeout := time.Duration(1000 * time.Millisecond)
 	done := make(chan error, 1)
-	c, err := rpc.DialHTTP("tcp", dest)
-	if err != nil {
-		log.Print("dialing:", err)
-		return false
-	}
-	defer c.Close()
 	go func() {
+		c, err := rpc.DialHTTP("tcp", dest)
+		if err != nil {
+			log.Print("dialing:", err)
+			done <- err
+			return
+		}
+		defer c.Close()
 		err = c.Call(rpcname, args, reply)
 		done <- err
 	}()

@@ -10,6 +10,8 @@ cd ~/ds/lab2/lab2_basic/src/main; bash test-mr.sh
 test bonus:
 cd ~/ds/lab2/lab2_bonus/src/main 
 
+go build -race -buildmode=plugin -gcflags="all=-N -l" ../mrapps/wc.go  
+
 go run -race mrcoordinator.go pg-*.txt 
 
 go run -race -gcflags="all=-N -l" mrworker.go wc.so localhost 6640  

@@ -34,7 +34,7 @@ type RegisterReply struct {
 type TaskRequest struct {
 	WorkerState int
 	WorkerId    int
-	FileName    string
+	MapId       int
 	ReduceId    int
 }
 

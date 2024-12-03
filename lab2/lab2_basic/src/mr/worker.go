@@ -50,11 +50,11 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			time.Sleep(10 * time.Millisecond) // avoid flooding the coordinator
 			args = TaskRequest{WorkerState: Idle, WorkerId: workerId}
 		} else if reply.TaskType == "map" {
-			execMap(reply.FileName, mapf, reply.MapId, reply.NReduce)
-			args = TaskRequest{WorkerState: MapFinished, WorkerId: workerId, FileName: reply.FileName}
+			execMap(reply.FileName, mapf, reply.MapId-1, reply.NReduce)
+			args = TaskRequest{WorkerState: MapFinished, WorkerId: workerId, MapId: reply.MapId - 1}
 		} else {
-			execReduce(reply.ReduceId, reducef, reply.MapCount)
-			args = TaskRequest{WorkerState: ReduceFinished, WorkerId: workerId, ReduceId: reply.ReduceId}
+			execReduce(reply.ReduceId-1, reducef, reply.MapCount)
+			args = TaskRequest{WorkerState: ReduceFinished, WorkerId: workerId, ReduceId: reply.ReduceId - 1}
 		}
 		ok := call("Coordinator.AllocateTasks", &args, &reply)
 		// Coordinator failure deteced through the return of RPC

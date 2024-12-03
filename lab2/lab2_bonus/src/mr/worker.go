@@ -41,12 +41,12 @@ func ihash(key string) int {
 }
 
 const (
-	coordinatorDest = "amamiya-yuuko.ost.sgsnet.se:8888"
-	myDest          = "yichen.hogs.sgsnet.se:8888"
+	coordinatorDest = "localhost:8888"
 )
 
+var myDest string
+
 type Files struct {
-	myDest string // ip:port of this worker
 }
 
 // Other workers call this by RPC to get file on this machine
@@ -78,10 +78,9 @@ func (f *Files) GetIntermidiateFile(arg *FetchReduceInputArgs, reply *FetchReduc
 }
 
 // main/mrworker.go calls this function.
-func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
-	f := Files{
-		myDest: myDest,
-	}
+func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string, url string) {
+	myDest = url
+	f := Files{}
 	f.server()
 
 	workerId := registerWorker()
@@ -166,7 +165,7 @@ func execMap(filename string, mapf func(string, string) []KeyValue, mapId int, n
 }
 
 func execReduce(reduceId int, reducef func(string, []string) string, nMap int, dests map[int]string) {
-	// fetch intermediate file from map workers through RPC
+	// fetch intermediate file from workers through RPC
 	// iterate ALL workers who have done "map" to fetch the needed file
 	intermediate := []KeyValue{}
 	for i := 0; i < nMap; i++ {
@@ -185,10 +184,8 @@ func execReduce(reduceId int, reducef func(string, []string) string, nMap int, d
 	// sort by key
 	sort.Sort(ByKey(intermediate))
 
-	// open file
-	oname := fmt.Sprintf("mr-out-%d.txt", reduceId)
-	ofile, _ := os.Create(oname)
-	log.Printf("output %s", oname)
+	finalResult := map[string]string{}
+
 	// Group the data and call the reduce function to process it
 	i := 0
 	for i < len(intermediate) {
@@ -201,10 +198,20 @@ func execReduce(reduceId int, reducef func(string, []string) string, nMap int, d
 			values = append(values, intermediate[k].Value)
 		}
 		output := reducef(intermediate[i].Key, values)
-		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+		finalResult[intermediate[i].Key] = output
 		i = j
 	}
-	ofile.Close()
+
+	//send final result to coordinator
+	args := SendReduceOutoutArgs{
+		ReduceId: reduceId,
+		Data:     finalResult,
+	}
+	reply := SendReduceOutputReply{}
+	ok := call("Coordinator.SendReduceOutput2Coordinator", coordinatorDest, &args, &reply)
+	if !ok {
+		log.Fatalf("Send reduce %d output to master failed", reduceId)
+	}
 }
 
 // send hearbeat

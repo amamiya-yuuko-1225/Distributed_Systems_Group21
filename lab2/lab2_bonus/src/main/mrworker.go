@@ -1,3 +1,9 @@
+/*
+ * @Author: amamiya-yuuko-1225 1913250675@qq.com
+ * @Date: 2024-12-02 13:01:36
+ * @LastEditors: amamiya-yuuko-1225 1913250675@qq.com
+ * @Description:
+ */
 package main
 
 //
@@ -10,21 +16,24 @@ package main
 // Please do not change this file.
 //
 
-import "6.5840/mr"
-import "plugin"
-import "os"
-import "fmt"
-import "log"
+import (
+	"fmt"
+	"log"
+	"os"
+	"plugin"
+
+	"6.5840/mr"
+)
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mrworker xxx.so\n")
+	if len(os.Args) != 3 {
+		fmt.Fprintf(os.Stderr, "Usage: mrworker xxx.so URL(worker rpc)\n")
 		os.Exit(1)
 	}
 
 	mapf, reducef := loadPlugin(os.Args[1])
 
-	mr.Worker(mapf, reducef)
+	mr.Worker(mapf, reducef, os.Args[2])
 }
 
 // load the application Map and Reduce functions

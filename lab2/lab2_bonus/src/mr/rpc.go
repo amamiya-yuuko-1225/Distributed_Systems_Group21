@@ -60,13 +60,12 @@ type TaskResponse struct {
 }
 
 // Add your RPC definitions here.
-type SendFileArgs struct {
-	MapId    int
+type SendReduceOutoutArgs struct {
 	ReduceId int
-	Data     []byte
+	Data     map[string]string
 }
 
-type SendFileReply struct {
+type SendReduceOutputReply struct {
 	Success bool
 }
 

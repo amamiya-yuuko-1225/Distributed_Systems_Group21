@@ -1,10 +1,12 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
+	"os"
 	"sync"
 	"time"
 )
@@ -69,6 +71,26 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
 	return c.reduceFinished
+}
+
+/**
+ * @description: Worker done reduce, and send final output to coordinator
+ * @param {*SendReduceOutoutArgs} args
+ * @param {*SendReduceOutputReply} reply
+ * @return {*}
+ */
+func (c *Coordinator) SendReduceOutput2Coordinator(args *SendReduceOutoutArgs, reply *SendReduceOutputReply) error {
+	reduceId, output := args.ReduceId, args.Data
+	// open file
+	oname := fmt.Sprintf("mr-out-%d.txt", reduceId)
+	ofile, _ := os.Create(oname)
+	for k, v := range output {
+		fmt.Fprintf(ofile, "%v %v\n", k, v)
+	}
+
+	log.Printf("output %s", oname)
+	ofile.Close()
+	return nil
 }
 
 /**
@@ -176,20 +198,24 @@ func (c *Coordinator) checkHeartBeat(workerId int) {
 						c.mapState[taskInfo.Value] = UnAllocated
 					}
 				}
+				hasDoneSomeMap := false
 				// reallocate all map tasks done on it
 				for mi, wi := range c.mapFileDest {
 					if wi == workerId {
 						filename := c.mapId2File[mi]
 						c.mapState[filename] = UnAllocated
 						c.mapCh <- MapTask{mi, filename}
+						hasDoneSomeMap = true
 					}
 				}
-				// reallocate all unfinished reduce tasks.
-				// since every reduce task are done based on map output on ALL workers
-				for ri := 0; ri < c.nReduce; ri++ {
-					if c.reduceState[ri] != Finished {
-						c.reduceCh <- ri
-						c.reduceState[ri] = UnAllocated
+				// reallocate all ongoing (allocated but unfinished) reduce tasks.
+				// since ANY reduce task are done based on EVERY map output
+				if c.mapFinished && hasDoneSomeMap {
+					for ri := 0; ri < c.nReduce; ri++ {
+						if c.reduceState[ri] == Allocated {
+							c.reduceCh <- ri
+							c.reduceState[ri] = UnAllocated
+						}
 					}
 				}
 				delete(c.workerTasks, workerId) // delete worker task record

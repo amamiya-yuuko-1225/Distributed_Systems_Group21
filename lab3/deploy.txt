@@ -1,0 +1,11 @@
+create:
+docker build -f create.Dockerfile -t create . 
+
+docker run -e ADDRESS="" -p 9082:9082 -p 8080:8080 -p 8082:8082  create 
+
+
+join:
+
+docker build -f join.Dockerfile -t join . 
+
+docker run -e ADDRESS="" -e JOIN_ADDRESS="" -p 9082:9082 -p 8080:8080 -p 8082:8082  join

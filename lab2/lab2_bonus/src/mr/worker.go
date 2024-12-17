@@ -37,7 +37,7 @@ func ihash(key string) int {
 }
 
 const (
-	coordinatorDest = "localhost:8888"
+	coordinatorDest = "192.168.137.77:8888"
 )
 
 var myDest string
@@ -282,7 +282,7 @@ func call(rpcname string, dest string, args interface{}, reply interface{}) bool
 	// because while worker A getting files from worker B
 	// the worker B may suddenly dies
 	// then worker A should exit and request task reallocation
-	timeout := time.Duration(1000 * time.Millisecond)
+	timeout := time.Duration(10000 * time.Millisecond)
 	done := make(chan error, 1)
 	go func() {
 		c, err := rpc.DialHTTP("tcp", dest)

@@ -1273,13 +1273,14 @@ func InitNodeFileSystem(nodeKey string) error {
 	return nil
 }
 
-// ListFiles returns a list of files stored in the node's directory
+// ListFiles lists files only from node-specific directory
 func ListFiles(nodeKey string) ([]string, error) {
-	var dir, errReadDir = os.ReadDir(ObtainFileDir(nodeKey))
-	if errReadDir != nil {
-		fmt.Printf("[files.ListFiles] could not read the directory: %v\n", errReadDir)
-		return nil, errReadDir
+	dir, err := os.ReadDir(ObtainFileDir(nodeKey))
+	if err != nil {
+		fmt.Printf("[files.ListFiles] could not read the directory: %v\n", err)
+		return nil, err
 	}
+
 	var files = []string{}
 	for _, file := range dir {
 		files = append(files, file.Name())
@@ -1300,14 +1301,13 @@ func ReadFile(filePath string) ([]byte, error) {
 }
 
 // ReadNodeFile reads and potentially decrypts a file from the DHT
-// Returns the file content and any error encountered
+// Now checks only node-specific directories
 func ReadNodeFile(nodeKey, fileKey string) ([]byte, error) {
 	var currentNode = Get()
 	var currentNodeID = currentNode.Info.Identifier.String()
 
 	// Helper function to read and parse file content
 	readAndParseFile := func(path string) ([]byte, error) {
-		// Read raw file content
 		content, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read file: %w", err)
@@ -1328,7 +1328,6 @@ func ReadNodeFile(nodeKey, fileKey string) ([]byte, error) {
 
 		// If current node is the upload node, attempt decryption
 		if fileContent.Metadata.UploadNodeID == currentNodeID {
-			// Initialize key management and decryption
 			km := NewKeyManager(currentNodeID)
 			fe := NewFileEncryptor(km)
 
@@ -1343,19 +1342,14 @@ func ReadNodeFile(nodeKey, fileKey string) ([]byte, error) {
 		return fileContent.Content, nil
 	}
 
-	// First try reading from the general resources directory
-	simplePath := filepath.Join("resources", fileKey)
-	if content, err := readAndParseFile(simplePath); err == nil {
-		return content, nil
-	}
-
-	// Then try node-specific directory
+	// Try reading from the specified node's directory
 	nodePath := filepath.Join("resources", nodeKey, fileKey)
 	if content, err := readAndParseFile(nodePath); err == nil {
 		return content, nil
 	}
 
-	// Finally, try reading from successor nodes
+	// If file not found and we're looking for a file that should be on this node,
+	// try reading from successor nodes
 	if currentNodeID == nodeKey {
 		for _, successor := range currentNode.Successors {
 			fmt.Printf("Attempting to read from successor node: %s\n",
@@ -1371,13 +1365,13 @@ func ReadNodeFile(nodeKey, fileKey string) ([]byte, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("file not found in any location: %s", fileKey)
+	return nil, fmt.Errorf("file not found: %s", fileKey)
 }
 
 // ReadRemoteFile attempts to read a file from a remote node
 func ReadRemoteFile(node NodeInfo, fileKey string) ([]byte, error) {
 	// 构建远程文件的完整路径
-	remoteFilePath := filepath.Join("resources", node.Identifier.String(), fileKey)
+	remoteFilePath := filepath.Join(FOLDER_RESOURCES, node.Identifier.String(), fileKey)
 	fmt.Printf("Attempting to read remote file: %s\n", remoteFilePath)
 
 	// 尝试通过 RPC 读取
@@ -1436,30 +1430,20 @@ func ObtainFileDir(nodeKey string) string {
 	return filepath.Join(FOLDER_RESOURCES, nodeKey)
 }
 
-// ObtainFilePath constructs the full path for a file in a node's storage
+// ObtainFilePath now only returns path in node-specific directory
 func ObtainFilePath(key, nodeKey string) string {
 	return filepath.Join(ObtainFileDir(nodeKey), key)
 }
 
 // NodeFileWrite writes content to a file in a node's storage
 func NodeFileWrite(key, nodeKey string, content []byte) error {
-	// 确保基础目录存在
-	if err := os.MkdirAll("resources", PERMISSIONS_DIR); err != nil {
-		return err
-	}
-
-	// 同时写入两个位置
-	// 1. 直接在resources下
-	if err := os.WriteFile(filepath.Join("resources", key), content, PERMISSIONS_FILE); err != nil {
-		return err
-	}
-
-	// 2. 在节点特定目录下
+	// Create node-specific directory if it doesn't exist
 	nodeDir := filepath.Join("resources", nodeKey)
 	if err := os.MkdirAll(nodeDir, PERMISSIONS_DIR); err != nil {
-		return err
+		return fmt.Errorf("failed to create node directory: %w", err)
 	}
 
+	// Write file only to node-specific directory
 	return os.WriteFile(filepath.Join(nodeDir, key), content, PERMISSIONS_FILE)
 }
 

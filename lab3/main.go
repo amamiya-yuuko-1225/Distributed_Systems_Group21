@@ -12,6 +12,7 @@ import (
 	"crypto/sha1"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"flag"
@@ -106,8 +107,9 @@ type Node struct {
 }
 
 // main initializes and starts a Chord node with the specified configuration
+// main initializes and starts the Chord node
 func main() {
-	// Parse and validate command line flags
+	// Parse command line flags
 	var f Flags
 	var errFlags = InitFlags(&f)
 	if errFlags != nil {
@@ -115,8 +117,23 @@ func main() {
 		return
 	}
 
-	// Initialize encryption system
-	km := NewKeyManager()
+	// Generate or use provided node identifier
+	var nodeIdentifier *big.Int
+	if f.identifierOverride != INVALID_STRING {
+		var res, errOptionalIdentifier = ConvertHexString(f.identifierOverride)
+		if errOptionalIdentifier != nil {
+			fmt.Printf("Identifier conversion error: %v\n", errOptionalIdentifier)
+			return
+		}
+		nodeIdentifier = res
+	} else {
+		// Generate identifier from address and port
+		address := NodeAddress(f.IpAddress) + ":" + NodeAddress(fmt.Sprintf("%v", f.ChordPort))
+		nodeIdentifier = Hash(string(address))
+	}
+
+	// Initialize node-specific key management
+	km := NewKeyManager(nodeIdentifier.String())
 	if err := km.GenerateKey(); err != nil {
 		fmt.Printf("Encryption initialization error: %v\n", err)
 		return
@@ -124,27 +141,15 @@ func main() {
 
 	// Initialize Chord ring configuration
 	var NewRingcreate = f.CreateNewRingSet()
-	var additionalIdetifier = f.GetAdditionaIIdentifier()
-	var additionalIdetifierBigInt *big.Int = nil
-	if additionalIdetifier != nil {
-		var res, errOptionalIdentifier = ConvertHexString(*additionalIdetifier)
-		if errOptionalIdentifier != nil {
-			fmt.Printf("Identifier conversion error: %v\n", errOptionalIdentifier)
-			return
-		}
-		additionalIdetifierBigInt = res
-	}
-
-	// Start the Chord node
-	var errChord = Start(f.IpAddress, f.ChordPort, BITS_SIZE_RING, f.SuccessorLimit, NewRingcreate, &f.JoinIpAddress, &f.JoinPort, additionalIdetifierBigInt)
+	var errChord = Start(f.IpAddress, f.ChordPort, BITS_SIZE_RING, f.SuccessorLimit,
+		NewRingcreate, &f.JoinIpAddress, &f.JoinPort, nodeIdentifier)
 	if errChord != nil {
 		fmt.Printf("Chord Node initialization error: %v\n", errChord)
 		return
 	}
 
 	// Initialize node's file system
-	var nodeKey = Get().Info.Identifier
-	InitNodeFileSystem(nodeKey.String())
+	InitNodeFileSystem(nodeIdentifier.String())
 
 	// Initialize RPC server
 	var listener, errListener = net.Listen("tcp", ":"+fmt.Sprintf("%v", f.ChordPort))
@@ -350,37 +355,63 @@ func Lookup(fileKey big.Int) (*NodeInfo, error) {
 	return node, nil
 }
 
-// Modified StoreFile function
+// FileMetadata contains information about the stored file
+type FileMetadata struct {
+	UploadNodeID string    // ID of the node that uploaded the file
+	Encrypted    bool      // Whether the file is encrypted
+	Timestamp    time.Time // When the file was stored
+}
+
+// FileContent combines file metadata with its content
+type FileContent struct {
+	Metadata FileMetadata // File metadata
+	Content  []byte       // File content (may be encrypted)
+}
+
+// StoreFile handles the storage of a file in the DHT with optional encryption
+// Returns the responsible node, file key, and any error encountered
 func StoreFile(filePath string, encrypted bool) (*NodeInfo, *big.Int, error) {
-	// Validate file path
+	// Validate the input file path
 	if err := validateFilePath(filePath); err != nil {
 		return nil, nil, fmt.Errorf("invalid file path: %w", err)
 	}
 
-	// Calculate file key
-	var fileName = GetFileName(filePath)
-	var fileKey = Hash(fileName)
+	// Get current node information
+	currentNode := Get()
+	nodeID := currentNode.Info.Identifier.String()
 
-	// Find responsible node
-	var node, errLookup = Lookup(*fileKey)
+	// Calculate file identifier
+	fileName := GetFileName(filePath)
+	fileKey := Hash(fileName)
+
+	// Find the responsible node in the DHT
+	node, errLookup := Lookup(*fileKey)
 	if errLookup != nil {
 		return nil, nil, fmt.Errorf("lookup failed: %w", errLookup)
 	}
 
-	// Read file content
+	// Read the file content
 	content, errRead := ReadFile(filePath)
 	if errRead != nil {
 		return nil, nil, fmt.Errorf("failed to read file: %w", errRead)
 	}
 
+	// Create file metadata
+	metadata := FileMetadata{
+		UploadNodeID: nodeID,
+		Encrypted:    encrypted,
+		Timestamp:    time.Now(),
+	}
+
 	// Handle encryption if requested
 	if encrypted {
-		// Initialize key manager and encryptor
-		km := NewKeyManager()
+		// Initialize key management for the current node
+		km := NewKeyManager(nodeID)
 		if err := km.GenerateKey(); err != nil {
 			return nil, nil, fmt.Errorf("failed to initialize encryption: %w", err)
 		}
 
+		// Create encryptor and encrypt content
 		fe := NewFileEncryptor(km)
 		encryptedContent, err := fe.EncryptFile(content)
 		if err != nil {
@@ -389,17 +420,28 @@ func StoreFile(filePath string, encrypted bool) (*NodeInfo, *big.Int, error) {
 		content = encryptedContent
 	}
 
-	// Store file using RPC
-	var currentNode = Get()
+	// Prepare the complete file content structure
+	fileContent := FileContent{
+		Metadata: metadata,
+		Content:  content,
+	}
+
+	// Serialize the content structure
+	serializedContent, err := json.Marshal(fileContent)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to serialize file content: %w", err)
+	}
+
+	// Store the file either locally or remotely
 	if node.Identifier.Cmp(&currentNode.Info.Identifier) == 0 {
-		// Store locally if target is current node
-		err := NodeFileWrite(fileKey.String(), currentNode.Info.Identifier.String(), content)
+		// Local storage
+		err := NodeFileWrite(fileKey.String(), currentNode.Info.Identifier.String(), serializedContent)
 		if err != nil {
 			return nil, nil, fmt.Errorf("local file write failed: %w", err)
 		}
 	} else {
-		// Store remotely using RPC
-		err := StoreFileClient(ObtainChordAddress(*node), *fileKey, content)
+		// Remote storage via RPC
+		err := StoreFileClient(ObtainChordAddress(*node), *fileKey, serializedContent)
 		if err != nil {
 			return nil, nil, fmt.Errorf("RPC storage failed: %w", err)
 		}
@@ -1200,7 +1242,6 @@ func CommandsExecution() {
 	}
 }
 
-
 // Global RWLock for thread-safe file operations
 var lock = new(sync.RWMutex)
 
@@ -1258,34 +1299,74 @@ func ReadFile(filePath string) ([]byte, error) {
 	return file, errRead
 }
 
-// ReadNodeFile reads a file from a node's storage
-// If local read fails, try to read from successors
+// ReadNodeFile reads and potentially decrypts a file from the DHT
+// Returns the file content and any error encountered
 func ReadNodeFile(nodeKey, fileKey string) ([]byte, error) {
-	// 首先尝试直接从resources目录读取
+	var currentNode = Get()
+	var currentNodeID = currentNode.Info.Identifier.String()
+
+	// Helper function to read and parse file content
+	readAndParseFile := func(path string) ([]byte, error) {
+		// Read raw file content
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read file: %w", err)
+		}
+
+		// Try to parse as FileContent structure
+		var fileContent FileContent
+		if err := json.Unmarshal(content, &fileContent); err != nil {
+			// If parsing fails, might be an old format file
+			// Return content as-is for backward compatibility
+			return content, nil
+		}
+
+		// If file is not encrypted, return content directly
+		if !fileContent.Metadata.Encrypted {
+			return fileContent.Content, nil
+		}
+
+		// If current node is the upload node, attempt decryption
+		if fileContent.Metadata.UploadNodeID == currentNodeID {
+			// Initialize key management and decryption
+			km := NewKeyManager(currentNodeID)
+			fe := NewFileEncryptor(km)
+
+			decryptedContent, err := fe.DecryptFile(fileContent.Content)
+			if err != nil {
+				return nil, fmt.Errorf("decryption failed: %w", err)
+			}
+			return decryptedContent, nil
+		}
+
+		// For non-upload nodes, return encrypted content
+		return fileContent.Content, nil
+	}
+
+	// First try reading from the general resources directory
 	simplePath := filepath.Join("resources", fileKey)
-	content, err := os.ReadFile(simplePath)
-	if err == nil {
+	if content, err := readAndParseFile(simplePath); err == nil {
 		return content, nil
 	}
 
-	// 如果直接读取失败，尝试从节点特定目录读取
+	// Then try node-specific directory
 	nodePath := filepath.Join("resources", nodeKey, fileKey)
-	content, err = os.ReadFile(nodePath)
-	if err == nil {
+	if content, err := readAndParseFile(nodePath); err == nil {
 		return content, nil
 	}
 
-	// 如果本地读取都失败，尝试从其他节点读取
-	var n = Get()
-	if n.Info.Identifier.String() == nodeKey {
-		for _, successor := range n.Successors {
-			fmt.Printf("Trying to read from successor: %s\n", successor.Identifier.String())
-			content, err = ReadRemoteFile(successor, fileKey)
+	// Finally, try reading from successor nodes
+	if currentNodeID == nodeKey {
+		for _, successor := range currentNode.Successors {
+			fmt.Printf("Attempting to read from successor node: %s\n",
+				successor.Identifier.String())
+
+			content, err := ReadRemoteFile(successor, fileKey)
 			if err == nil {
-				// 找到文件后，保存一个本地副本
+				// Save a local copy and process it
 				_ = os.MkdirAll(filepath.Join("resources", nodeKey), PERMISSIONS_DIR)
 				_ = NodeFileWrite(fileKey, nodeKey, content)
-				return content, nil
+				return readAndParseFile(filepath.Join("resources", nodeKey, fileKey))
 			}
 		}
 	}
@@ -1323,16 +1404,17 @@ func (t *ChordRPCHandler) ReadFile(fileKey *string, reply *FileContentReply) err
 	if fileKey == nil {
 		return fmt.Errorf("invalid file key")
 	}
-	// Get() returns Node, which contains Info.Identifier as big.Int
-	// We need to get the pointer to call String()
+
 	n := Get()
-	nodeKeyInt := &n.Info.Identifier // Get pointer to big.Int
-	nodeKey := nodeKeyInt.String()   // Now correctly call String() on pointer
+	nodeKeyInt := &n.Info.Identifier
+	nodeKey := nodeKeyInt.String()
 
 	content, err := os.ReadFile(ObtainFilePath(*fileKey, nodeKey))
 	if err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
 	}
+
+	// 不在RPC层进行解密，保持原始加密状态传输
 	reply.Content = content
 	return nil
 }
@@ -1553,12 +1635,14 @@ func (t *ChordRPCHandler) Notify(args *NodeInfo, reply *string) error {
 // KeyManager handles AES key generation and management
 type KeyManager struct {
 	KeyPath string
+	NodeID  string // 添加节点ID标识
 }
 
 // NewKeyManager creates a new key manager instance
-func NewKeyManager() *KeyManager {
+func NewKeyManager(nodeID string) *KeyManager {
 	return &KeyManager{
-		KeyPath: ENCRYPTION_KEY_PATH,
+		KeyPath: filepath.Join("./keys", nodeID, "aes.key"),
+		NodeID:  nodeID,
 	}
 }
 

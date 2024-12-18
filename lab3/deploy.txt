@@ -1,18 +1,4 @@
-create:
-docker build -f create.Dockerfile -t create . 
-
-docker run -it -v /home/ubuntu:/home -e ADDRESS="" -p 9082:9082 -p 8080:8080 -p 8082:8082  create 
-
-
-join:
-
-docker build -f join.Dockerfile -t join . 
-
-docker run -it -v /home/ubuntu:/home -e ADDRESS="172.31.91.47" -e JOIN_ADDRESS="172.31.95.188" -e JOIN_PORT="8082" -p 9082:9082 -p 8080:8080 -p 8082:8082 join
-
-
-docker rm -f $(docker ps -aq)
-
+1. Build up env for a ubuntu 22.04 LTS server:
 sudo su
 curl -fsSL https://test.docker.com -o test-docker.sh
 sudo sh test-docker.sh
@@ -20,3 +6,24 @@ git clone https://github.com/amamiya-yuuko-1225/Distributed_Systems_Group21.git
 cd Distributed_Systems_Group21/lab3
 docker build -f join.Dockerfile -t join . 
 docker build -f create.Dockerfile -t create . 
+
+
+2. Create chord ring (fill in ADDRESS):
+docker run -it -v /home/ubuntu:/home -e ADDRESS="" -p 9082:9082 -p 8080:8080 -p 8082:8082  create 
+
+
+3. Join chord ring (fill in ADDRESS and JOIN_ADDRESS):
+docker run -it -v /home/ubuntu:/home -e ADDRESS="" -e JOIN_ADDRESS="" -e JOIN_PORT="8082" -p 9082:9082 -p 8080:8080 -p 8082:8082 join
+
+4. After demo, clean containers:
+docker rm -f $(docker ps -aq)
+
+
+
+DEMO PROCEDURE:
+1. create ring
+2. join
+3. store a from A to B
+4. lookup a from A, print orginal text
+5. lookup a from B, print encrypted text
+6. B leave, A look up a, get backup successfully 

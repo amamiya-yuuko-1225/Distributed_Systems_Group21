@@ -20,4 +20,4 @@ RUN go mod download  && go mod verify
 
 COPY . .
 RUN go build -o /usr/local/bin/create .
-CMD ["sh", "-c", "create -a $ADDRESS -p $PORT -sp $SSH_PORT -ts $TIME_STABILIZE -tff $TIME_FIX_FINGERS -tcp $TIME_CHECK_PREDECESSOR -tb $TIME_BACKUP -r $SUCCESSOR_LIST_SIZE \n"]
+CMD ["sh", "-c", "create -a $ADDRESS -p $PORT -ts $TIME_STABILIZE -tff $TIME_FIX_FINGERS -tcp $TIME_CHECK_PREDECESSOR -tb $TIME_BACKUP -r $SUCCESSOR_LIST_SIZE \n"]

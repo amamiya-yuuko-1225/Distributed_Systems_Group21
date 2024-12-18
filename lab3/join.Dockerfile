@@ -23,4 +23,4 @@ RUN go mod download  && go mod verify
 
 COPY . .
 RUN go build -o /usr/local/bin/join .
-ENTRYPOINT join -a "${ADDRESS}" -p "${PORT}" -sp "${SSH_PORT}" --ja "${JOIN_ADDRESS}" --jp "${JOIN_PORT}" --ts "${TIME_STABILIZE}" --tff "${TIME_FIX_FINGERS}" --tcp "${TIME_CHECK_PREDECESSOR}" --tb "${TIME_BACKUP}" -r "${SUCCESSOR_LIST_SIZE}"
+ENTRYPOINT join -a "${ADDRESS}" -p "${PORT}" --ja "${JOIN_ADDRESS}" --jp "${JOIN_PORT}" --ts "${TIME_STABILIZE}" --tff "${TIME_FIX_FINGERS}" --tcp "${TIME_CHECK_PREDECESSOR}" --tb "${TIME_BACKUP}" -r "${SUCCESSOR_LIST_SIZE}"

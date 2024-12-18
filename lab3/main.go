@@ -1350,18 +1350,16 @@ func ReadNodeFile(nodeKey, fileKey string) ([]byte, error) {
 
 	// If file not found and we're looking for a file that should be on this node,
 	// try reading from successor nodes
-	if currentNodeID == nodeKey {
-		for _, successor := range currentNode.Successors {
-			fmt.Printf("Attempting to read from successor node: %s\n",
-				successor.Identifier.String())
+	for _, successor := range currentNode.Successors {
+		fmt.Printf("Attempting to read from successor node: %s\n",
+			successor.Identifier.String())
 
-			content, err := ReadRemoteFile(successor, fileKey)
-			if err == nil {
-				// Save a local copy and process it
-				_ = os.MkdirAll(filepath.Join("resources", nodeKey), PERMISSIONS_DIR)
-				_ = NodeFileWrite(fileKey, nodeKey, content)
-				return readAndParseFile(filepath.Join("resources", nodeKey, fileKey))
-			}
+		content, err := ReadRemoteFile(successor, fileKey)
+		if err == nil {
+			// Save a local copy and process it
+			_ = os.MkdirAll(filepath.Join("resources", nodeKey), PERMISSIONS_DIR)
+			_ = NodeFileWrite(fileKey, nodeKey, content)
+			return readAndParseFile(filepath.Join("resources", nodeKey, fileKey))
 		}
 	}
 

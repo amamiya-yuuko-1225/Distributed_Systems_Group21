@@ -5,17 +5,17 @@ package main
 
 import (
 	"bufio"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -25,9 +25,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/pkg/sftp"
-	"golang.org/x/crypto/ssh"
 )
 
 // BITS_SIZE_RING defines the size of the identifier space in the Chord ring.
@@ -35,20 +32,14 @@ import (
 // This ensures a large enough address space to minimize the probability of ID collisions.
 const BITS_SIZE_RING = 160
 
-// Constants for RSA encryption operations
+// Constants for encryption operations
 const (
-	// LABEL is used as additional data in encryption operations
-	LABEL = "content"
-	// Paths to various encryption and authentication keys
-	ENCRYPTION_PUBLIC_KEY_PATH      = "./keys/encryption-pub.pem"
-	AUTHENTICATION_PUBLIC_KEY_PATH  = "./keys/id_rsa.pub"
-	AUTHENTICATION_PRIVATE_KEY_PATH = "./keys/id_rsa"
-)
-
-// Constants for SFTP operations
-const (
-	// USER defines the username for SFTP connections
-	USER = "Mayoi"
+	// Key size for AES-256
+	AES_KEY_SIZE = 32
+	// Path for storing the encryption key
+	ENCRYPTION_KEY_PATH = "./keys/aes.key"
+	// File permissions for key storage
+	KEY_PERMISSIONS = 0600
 )
 
 // File system related constants
@@ -100,7 +91,6 @@ type Key string
 type NodeInfo struct {
 	IpAddress  string  // Node's IP address
 	ChordPort  int     // Port used for Chord protocol communication
-	SshPort    int     // Port used for SSH/SFTP file transfer
 	Identifier big.Int // Node's position in the Chord ring
 }
 
@@ -126,7 +116,8 @@ func main() {
 	}
 
 	// Initialize encryption system
-	if err := initEncryption(); err != nil {
+	km := NewKeyManager()
+	if err := km.GenerateKey(); err != nil {
 		fmt.Printf("Encryption initialization error: %v\n", err)
 		return
 	}
@@ -145,7 +136,7 @@ func main() {
 	}
 
 	// Start the Chord node
-	var errChord = Start(f.IpAddress, f.ChordPort, f.SshPort, BITS_SIZE_RING, f.SuccessorLimit, NewRingcreate, &f.JoinIpAddress, &f.JoinPort, additionalIdetifierBigInt)
+	var errChord = Start(f.IpAddress, f.ChordPort, BITS_SIZE_RING, f.SuccessorLimit, NewRingcreate, &f.JoinIpAddress, &f.JoinPort, additionalIdetifierBigInt)
 	if errChord != nil {
 		fmt.Printf("Chord Node initialization error: %v\n", errChord)
 		return
@@ -154,19 +145,6 @@ func main() {
 	// Initialize node's file system
 	var nodeKey = Get().Info.Identifier
 	InitNodeFileSystem(nodeKey.String())
-
-	// Initialize SFTP server
-	sftpServer, err := NewSFTPServer(f.SshPort)
-	if err != nil {
-		fmt.Printf("SFTP server initialization error: %v\n", err)
-		return
-	}
-
-	// Start SFTP server
-	if err := sftpServer.Start(); err != nil {
-		fmt.Printf("SFTP server start error: %v\n", err)
-		return
-	}
 
 	// Initialize RPC server
 	var listener, errListener = net.Listen("tcp", ":"+fmt.Sprintf("%v", f.ChordPort))
@@ -190,7 +168,6 @@ func main() {
 type Flags struct {
 	IpAddress            string // Node's IP address
 	ChordPort            int    // Port for Chord protocol
-	SshPort              int    // Port for SSH server
 	JoinIpAddress        string // IP of existing node to join
 	JoinPort             int    // Port of existing node to join
 	TimeStabilize        int    // Interval between stabilize calls
@@ -209,18 +186,16 @@ const (
 
 // InitFlags initializes and validates command line flags
 func InitFlags(f *Flags) error {
-	//Placeholder default value as item must be specified
-	flag.StringVar(&f.IpAddress, "a", INVALID_STRING, "The IP address that the Chord client will bind to, as well as advertise to other nodes. Represented as an ASCII string (e.g., 128.8.126.63). Must be specified.")
-	flag.IntVar(&f.ChordPort, "p", INVALID_INT, "The port that the Chord client will bind to and listen on. Represented as a base-10 integer. Must be specified.")
-	flag.IntVar(&f.SshPort, "sp", INVALID_INT, "The port number for the SSH server. Must be specidfied")
-	flag.StringVar(&f.JoinIpAddress, "ja", INVALID_STRING, "The IP address of the machine running a Chord node. The Chord client will join this nodes ring. Represented as an ASCII string (e.g., 128.8.126.63). Must be specified if --jp is specified.")
-	flag.IntVar(&f.JoinPort, "jp", INVALID_INT, "The port that an existing Chord node is bound to and listening on. The Chord client will join this nodes ring. Represented as a base-10 integer. Must be specified if --ja is specified.")
-	flag.IntVar(&f.TimeStabilize, "ts", INVALID_INT, "The time in milliseconds between invocations of 'stabilize'. Represented as a base-10 integer. Must be specified, with a value in the range of [1,60000].")
-	flag.IntVar(&f.TimeFixFingers, "tff", INVALID_INT, "The time in milliseconds between invocations of 'fix fingers'. Represented as a base-10 integer. Must be specified, with a value in the range of [1,60000].")
-	flag.IntVar(&f.TimeCheckPredecessor, "tcp", INVALID_INT, "The time in milliseconds between invocations of check predecessor.")
-	flag.IntVar(&f.TimeBackup, "tb", INVALID_INT, "The time duration for backup interval.Must be specified")
-	flag.IntVar(&f.SuccessorLimit, "r", INVALID_INT, "The number of successors maintained by the Chord client. Represented as a base-10 integer. Must be specified, with a value in the range of [1,32].")
-	flag.StringVar(&f.identifierOverride, "i", INVALID_STRING, "The identifier (ID) assigned to the Chord client which will override the ID computed by the SHA1 sum of the client's IP address and port number. Represented as a string of 40 characters matching [0-9a-fA-F]. Optional parameter.")
+	flag.StringVar(&f.IpAddress, "a", INVALID_STRING, "The IP address that the Chord client will bind to, as well as advertise to other nodes. (e.g., 128.8.126.63)")
+	flag.IntVar(&f.ChordPort, "p", INVALID_INT, "The port that the Chord client will bind to and listen on.")
+	flag.StringVar(&f.JoinIpAddress, "ja", INVALID_STRING, "The IP address of the machine running a Chord node to join.")
+	flag.IntVar(&f.JoinPort, "jp", INVALID_INT, "The port that an existing Chord node is listening on.")
+	flag.IntVar(&f.TimeStabilize, "ts", INVALID_INT, "Time in milliseconds between stabilize calls [1,60000].")
+	flag.IntVar(&f.TimeFixFingers, "tff", INVALID_INT, "Time in milliseconds between fix_fingers calls [1,60000].")
+	flag.IntVar(&f.TimeCheckPredecessor, "tcp", INVALID_INT, "Time in milliseconds between check predecessor calls.")
+	flag.IntVar(&f.TimeBackup, "tb", INVALID_INT, "Time in milliseconds between backup operations.")
+	flag.IntVar(&f.SuccessorLimit, "r", INVALID_INT, "Number of successors maintained [1,32].")
+	flag.StringVar(&f.identifierOverride, "i", INVALID_STRING, "Optional identifier override (40 character hex string).")
 	flag.Parse()
 	return FlagsValidation(f)
 }
@@ -237,51 +212,82 @@ func ErrorMessageCreation(flagname, description string) string {
 
 // FlagsValidation performs comprehensive validation of all command line flags
 func FlagsValidation(f *Flags) error {
-	var errorString = ""
+	var errorMessages []string
+
+	// Validate IP Address
 	if f.IpAddress == INVALID_STRING {
-		errorString += ErrorMessageCreation("-a", "IP Address Binding error")
+		errorMessages = append(errorMessages,
+			ErrorMessageCreation("-a", "IP Address must be specified"))
 	}
+
+	// Validate Chord Port
 	if f.ChordPort == INVALID_INT {
-		errorString += ErrorMessageCreation("-p", "Port number Error")
+		errorMessages = append(errorMessages,
+			ErrorMessageCreation("-p", "Port number must be specified"))
+	} else if !RangeFlagValidation(f.ChordPort, 1024, 65535) {
+		errorMessages = append(errorMessages,
+			ErrorMessageCreation("-p", "Port must be between 1024 and 65535"))
 	}
-	if f.SshPort == INVALID_INT {
-		errorString += ErrorMessageCreation("-sp", "SSH server port number error")
-	}
-	if (f.JoinIpAddress == INVALID_STRING && f.JoinPort != INVALID_INT) || (f.JoinIpAddress != INVALID_STRING && f.JoinPort == INVALID_INT) {
+
+	// Validate Join Address and Port
+	if (f.JoinIpAddress == INVALID_STRING && f.JoinPort != INVALID_INT) ||
+		(f.JoinIpAddress != INVALID_STRING && f.JoinPort == INVALID_INT) {
 		var flagname string
 		if f.JoinIpAddress == INVALID_STRING {
-			flagname = "--ja"
+			flagname = "-ja"
 		} else {
-			flagname = "--jp"
+			flagname = "-jp"
 		}
-		errorString += ErrorMessageCreation(flagname, "Both -ja and -jp needs to specified")
+		errorMessages = append(errorMessages,
+			ErrorMessageCreation(flagname, "Both -ja and -jp must be specified together"))
 	}
+
+	// Validate Time Intervals
 	if !RangeFlagValidation(f.TimeStabilize, 1, 60000) {
-		errorString += ErrorMessageCreation("--ts", "stabilize call, range [1, 60000]")
+		errorMessages = append(errorMessages,
+			ErrorMessageCreation("-ts", "Stabilize interval must be between 1 and 60000 milliseconds"))
 	}
+
 	if !RangeFlagValidation(f.TimeFixFingers, 1, 60000) {
-		errorString += ErrorMessageCreation("--tff", "fix fingers call, range [1, 60000]")
+		errorMessages = append(errorMessages,
+			ErrorMessageCreation("-tff", "Fix fingers interval must be between 1 and 60000 milliseconds"))
 	}
+
 	if !RangeFlagValidation(f.TimeCheckPredecessor, 1, 60000) {
-		errorString += ErrorMessageCreation("--tcp", "check predecessor call, range [1, 60000]")
+		errorMessages = append(errorMessages,
+			ErrorMessageCreation("-tcp", "Check predecessor interval must be between 1 and 60000 milliseconds"))
 	}
+
 	if !RangeFlagValidation(f.TimeBackup, 1, 60000) {
-		errorString += ErrorMessageCreation("--tcp", " run backup files call, range [1, 60000]")
+		errorMessages = append(errorMessages,
+			ErrorMessageCreation("-tb", "Backup interval must be between 1 and 60000 milliseconds"))
 	}
+
+	// Validate Successor Limit
 	if !RangeFlagValidation(f.SuccessorLimit, 1, 32) {
-		errorString += ErrorMessageCreation("-r", "successors should be in range [1, 32]")
+		errorMessages = append(errorMessages,
+			ErrorMessageCreation("-r", "Number of successors must be between 1 and 32"))
 	}
+
+	// Validate Optional Identifier Override
 	if f.identifierOverride != INVALID_STRING {
-		var noOfChars = BITS_SIZE_RING / 4
-		var _, err = hex.DecodeString(f.identifierOverride)
-		if err != nil || noOfChars != len(f.identifierOverride) {
-			errorString += ErrorMessageCreation("-i", fmt.Sprintf("hexadecimal should be in values: [0-9][a-f][A-F], number of values: %v", noOfChars))
+		expectedLength := BITS_SIZE_RING / 4 // Convert bits to hex characters
+		if _, err := hex.DecodeString(f.identifierOverride); err != nil ||
+			len(f.identifierOverride) != expectedLength {
+			errorMessages = append(errorMessages,
+				ErrorMessageCreation("-i", fmt.Sprintf(
+					"Identifier must be a valid hex string of exactly %d characters",
+					expectedLength)))
 		}
 	}
-	if errorString == "" {
-		return nil
+
+	// If any validation errors occurred, combine them and return
+	if len(errorMessages) > 0 {
+		return fmt.Errorf("Flag validation failed:\n%s",
+			strings.Join(errorMessages, ""))
 	}
-	return errors.New(errorString)
+
+	return nil
 }
 
 // GetAdditionaIIdentifier returns the optional identifier override if specified
@@ -344,57 +350,46 @@ func Lookup(fileKey big.Int) (*NodeInfo, error) {
 	return node, nil
 }
 
-// StoreFile stores a file in the DHT with optional encryption and SSH transfer
-// Returns:
-// - NodeInfo: the node where the file is stored
-// - big.Int: the file's key in the DHT
-// - error: any error that occurred during the process
-func StoreFile(filePath string, ssh bool, encrypted bool) (*NodeInfo, *big.Int, error) {
-	// Validate file path before proceeding
+// Modified StoreFile function
+func StoreFile(filePath string, encrypted bool) (*NodeInfo, *big.Int, error) {
+	// Validate file path
 	if err := validateFilePath(filePath); err != nil {
 		return nil, nil, fmt.Errorf("invalid file path: %w", err)
 	}
 
-	// Get filename and calculate its hash as key
+	// Calculate file key
 	var fileName = GetFileName(filePath)
 	var fileKey = Hash(fileName)
 
-	// Find responsible node for this key
+	// Find responsible node
 	var node, errLookup = Lookup(*fileKey)
 	if errLookup != nil {
 		return nil, nil, fmt.Errorf("lookup failed: %w", errLookup)
 	}
 
-	// Read the file content
-	var content, errRead = ReadFile(filePath)
+	// Read file content
+	content, errRead := ReadFile(filePath)
 	if errRead != nil {
 		return nil, nil, fmt.Errorf("failed to read file: %w", errRead)
 	}
 
 	// Handle encryption if requested
 	if encrypted {
-		// Initialize key manager
-		km := NewKeyManager(
-			"./keys/encryption-private.pem",
-			"./keys/encryption-pub.pem",
-			2048,
-		)
-
-		// Generate keys if they don't exist
-		if err := km.GenerateKeys(); err != nil {
+		// Initialize key manager and encryptor
+		km := NewKeyManager()
+		if err := km.GenerateKey(); err != nil {
 			return nil, nil, fmt.Errorf("failed to initialize encryption: %w", err)
 		}
 
-		// Create encryptor and encrypt file
 		fe := NewFileEncryptor(km)
-		var encryptedContent, errEncryption = fe.EncryptFile(filePath)
-		if errEncryption != nil {
-			return nil, nil, fmt.Errorf("encryption failed: %w", errEncryption)
+		encryptedContent, err := fe.EncryptFile(content)
+		if err != nil {
+			return nil, nil, fmt.Errorf("encryption failed: %w", err)
 		}
 		content = encryptedContent
 	}
 
-	// Check if target node is current node
+	// Store file using RPC
 	var currentNode = Get()
 	if node.Identifier.Cmp(&currentNode.Info.Identifier) == 0 {
 		// Store locally if target is current node
@@ -403,22 +398,13 @@ func StoreFile(filePath string, ssh bool, encrypted bool) (*NodeInfo, *big.Int, 
 			return nil, nil, fmt.Errorf("local file write failed: %w", err)
 		}
 	} else {
-		// Use either SSH or RPC for remote storage
-		if ssh {
-			var fileName = fileKey.String()
-			var errSftp = FileSending(ObtainSshAddress(*node), fileName, content)
-			if errSftp != nil {
-				return nil, nil, fmt.Errorf("SFTP transfer failed: %w", errSftp)
-			}
-		} else {
-			var errRpc = StoreFileClient(ObtainChordAddress(*node), *fileKey, content)
-			if errRpc != nil {
-				return nil, nil, fmt.Errorf("RPC storage failed: %w", errRpc)
-			}
+		// Store remotely using RPC
+		err := StoreFileClient(ObtainChordAddress(*node), *fileKey, content)
+		if err != nil {
+			return nil, nil, fmt.Errorf("RPC storage failed: %w", err)
 		}
 	}
 
-	// Log storage success
 	fmt.Printf("File stored successfully at node %v with key %v\n",
 		node.Identifier.String(), fileKey.String())
 
@@ -447,7 +433,7 @@ func validateFilePath(path string) error {
 // ObtainNodeState generates a string representation of a node's state
 // Includes node identifier, IP address, port numbers, and optional index information
 func ObtainNodeState(node NodeInfo, collectionItem bool, index int, idealIdentifier *big.Int) (*string, error) {
-	var nodeInfo = fmt.Sprintf("\nNode Identifier: %v\nNode IP address: %v | Chord Node Port Number: %v | SSH Server Port Number: %v", node.Identifier.String(), node.IpAddress, node.ChordPort, node.SshPort)
+	var nodeInfo = fmt.Sprintf("\nNode Identifier: %v\nNode IP address: %v | Chord Node Port Number: %v ", node.Identifier.String(), node.IpAddress, node.ChordPort)
 	if collectionItem {
 		nodeInfo += fmt.Sprintf("\nNode Index Value: %v | Node Index Identifier: %v", index, idealIdentifier)
 	}
@@ -585,11 +571,11 @@ func NearestPrecedingNode(id big.Int) NodeInfo {
 
 // Start initializes a new Chord node and either creates a new ring or joins an existing one
 // This is the main entry point for node initialization
-func Start(ipAddress string, chordPort, sshPort, fingerTableSize, successorsSize int, NewRingcreate bool,
+func Start(ipAddress string, chordPort, fingerTableSize, successorsSize int, NewRingcreate bool,
 	joinIpAddress *string, joinPort *int, additionalIdetifier *big.Int) error {
-	fmt.Printf("Beginning Chord Node at %v:%v with SSHServer on port: %v", ipAddress, chordPort, sshPort)
+	fmt.Printf("Starting Chord Node at %v:%v\n", ipAddress, chordPort)
 	// Initialize node instance
-	var err = NodeInstanceInit(ipAddress, chordPort, sshPort, fingerTableSize, successorsSize, additionalIdetifier)
+	var err = NodeInstanceInit(ipAddress, chordPort, fingerTableSize, successorsSize, additionalIdetifier)
 	if err != nil {
 		return err
 	}
@@ -614,12 +600,10 @@ func create() {
 // Implements the Chord protocol's join operation
 func join(joinIpAddress string, joinPort int, nodeId *big.Int, maxSteps int) error {
 	var joinHash = big.NewInt(-1)
-	var sshPort = -1
 
 	var successor, errFind = find(*nodeId, NodeInfo{
 		IpAddress:  joinIpAddress,
 		ChordPort:  joinPort,
-		SshPort:    sshPort,
 		Identifier: *joinHash}, maxSteps)
 	if errFind != nil {
 		return errFind
@@ -924,33 +908,28 @@ var instance Node
 
 // NodeInstanceInit initializes the Chord node as a singleton
 // Sets up the node's initial state including finger table and successor list
-func NodeInstanceInit(ipAddress string, chordPort, sshPort, fingerTableSize, successorsSize int, additionalIdetifier *big.Int) error {
+func NodeInstanceInit(ipAddress string, chordPort, fingerTableSize, successorsSize int, additionalIdetifier *big.Int) error {
 	if fingerTableSize < 1 || successorsSize < 1 {
-		return errors.New("The Size needs to be atleast 1")
+		return errors.New("The Size needs to be at least 1")
 	}
 
-	// Initialize node instance only once
 	once.Do(func() {
 		var address = NodeAddress(ipAddress) + ":" + NodeAddress(fmt.Sprintf("%v", chordPort))
 		var info NodeInfo
-		// Use provided identifier or generate from address
 		if additionalIdetifier == nil {
 			info = NodeInfo{
 				IpAddress:  ipAddress,
 				ChordPort:  chordPort,
-				SshPort:    sshPort,
 				Identifier: *Hash(string(address)),
 			}
 		} else {
 			info = NodeInfo{
 				IpAddress:  ipAddress,
 				ChordPort:  chordPort,
-				SshPort:    sshPort,
 				Identifier: *additionalIdetifier,
 			}
 		}
 
-		// Initialize node with empty tables
 		instance = Node{
 			Info:            info,
 			FingerTable:     []NodeInfo{},
@@ -967,11 +946,6 @@ func NodeInstanceInit(ipAddress string, chordPort, sshPort, fingerTableSize, suc
 // ObtainChordAddress formats a node's address for Chord protocol communication
 func ObtainChordAddress(node NodeInfo) NodeAddress {
 	return NodeAddress(fmt.Sprintf("%v:%v", node.IpAddress, node.ChordPort))
-}
-
-// ObtainSshAddress formats a node's address for SSH communication
-func ObtainSshAddress(node NodeInfo) string {
-	return fmt.Sprintf("%v:%v", node.IpAddress, node.SshPort)
 }
 
 // NextFingerUpdation returns the next finger table entry to update
@@ -1180,9 +1154,8 @@ func CommandExecution(cmdArr []string) {
 		fmt.Printf("\ncontent of file:\n%s\n", content)
 
 	case "StoreFile", "s":
-		var ssh = ObtainTurnOffOption(cmdArr, 2)
 		var encryption = ObtainTurnOffOption(cmdArr, 3)
-		var node, fileKey, errStore = StoreFile(cmdArr[1], ssh, encryption)
+		var node, fileKey, errStore = StoreFile(cmdArr[1], encryption)
 		if errStore != nil {
 			fmt.Println(errStore.Error())
 			return
@@ -1227,15 +1200,6 @@ func CommandsExecution() {
 	}
 }
 
-// Encryption encrypts content using RSA with OAEP padding
-func Encryption(content []byte) ([]byte, error) {
-	var pubKey, err = ObtainPubKey(ENCRYPTION_PUBLIC_KEY_PATH)
-	if err != nil {
-		return nil, err
-	}
-	var rand = rand.Reader
-	return rsa.EncryptOAEP(sha256.New(), rand, pubKey, content, []byte(LABEL))
-}
 
 // Global RWLock for thread-safe file operations
 var lock = new(sync.RWMutex)
@@ -1336,13 +1300,7 @@ func ReadRemoteFile(node NodeInfo, fileKey string) ([]byte, error) {
 	fmt.Printf("Attempting to read remote file: %s\n", remoteFilePath)
 
 	// 尝试通过 RPC 读取
-	content, err := ReadFileRPC(ObtainChordAddress(node), fileKey)
-	if err == nil {
-		return content, nil
-	}
-
-	// 如果 RPC 失败，尝试通过 SFTP 读取
-	return ReadFileSFTP(ObtainSshAddress(node), remoteFilePath)
+	return ReadFileRPC(ObtainChordAddress(node), fileKey)
 }
 
 // ReadFileRPC reads a file from a remote node using RPC
@@ -1353,60 +1311,6 @@ func ReadFileRPC(nodeAddress NodeAddress, fileKey string) ([]byte, error) {
 		return nil, err
 	}
 	return reply.Content, nil
-}
-
-// ReadFileSFTP reads a file from a remote node using SFTP
-func ReadFileSFTP(address, fileKey string) ([]byte, error) {
-	// Set up SSH client configuration
-	authMethod, err := ObtainSSHAuthentication(AUTHENTICATION_PRIVATE_KEY_PATH)
-	if err != nil {
-		return nil, err
-	}
-
-	keyContent, err := ObtainKeyBytes(AUTHENTICATION_PUBLIC_KEY_PATH)
-	if err != nil {
-		return nil, err
-	}
-
-	publicKey, _, _, _, err := ssh.ParseAuthorizedKey(keyContent)
-	if err != nil {
-		return nil, err
-	}
-
-	pubKey, err := ssh.ParsePublicKey(publicKey.Marshal())
-	if err != nil {
-		return nil, err
-	}
-
-	config := ssh.ClientConfig{
-		User:            USER,
-		Auth:            []ssh.AuthMethod{authMethod},
-		HostKeyCallback: ssh.FixedHostKey(pubKey),
-	}
-
-	// Connect to remote server
-	conn, err := ssh.Dial("tcp", address, &config)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-
-	// Create SFTP client
-	client, err := sftp.NewClient(conn)
-	if err != nil {
-		return nil, err
-	}
-	defer client.Close()
-
-	// Open and read the file
-	filePath := filepath.Join("resources", fileKey)
-	file, err := client.Open(filePath)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	return io.ReadAll(file)
 }
 
 // Add new RPC handler for file reading
@@ -1581,19 +1485,6 @@ func ObtainKeyBytes(keyPath string) ([]byte, error) {
 	return content, nil
 }
 
-// ObtainSSHAuthentication creates an SSH authentication method from a private key
-func ObtainSSHAuthentication(privateKeyPath string) (ssh.AuthMethod, error) {
-	var content, errRead = ObtainKeyBytes(privateKeyPath)
-	if errRead != nil {
-		return nil, errRead
-	}
-	var key, parseErr = ssh.ParsePrivateKey(content)
-	if parseErr != nil {
-		return nil, parseErr
-	}
-	return ssh.PublicKeys(key), nil
-}
-
 // ObtainPubKey loads and parses an RSA public key from a file
 func ObtainPubKey(path string) (*rsa.PublicKey, error) {
 	var content, errRead = ObtainKeyBytes(path)
@@ -1659,141 +1550,131 @@ func (t *ChordRPCHandler) Notify(args *NodeInfo, reply *string) error {
 	return nil
 }
 
-// KeyManager handles RSA key generation and management
+// KeyManager handles AES key generation and management
 type KeyManager struct {
-	PrivateKeyPath string
-	PublicKeyPath  string
-	KeyBits        int // RSA key size in bits
+	KeyPath string
 }
 
-// NewKeyManager creates a new key manager with specified paths and key size
-func NewKeyManager(privPath, pubPath string, bits int) *KeyManager {
+// NewKeyManager creates a new key manager instance
+func NewKeyManager() *KeyManager {
 	return &KeyManager{
-		PrivateKeyPath: privPath,
-		PublicKeyPath:  pubPath,
-		KeyBits:        bits,
+		KeyPath: ENCRYPTION_KEY_PATH,
 	}
 }
 
-// GenerateKeys generates a new RSA key pair if they don't exist
-func (km *KeyManager) GenerateKeys() error {
-	// Check if keys already exist
-	if _, err := os.Stat(km.PublicKeyPath); err == nil {
-		return nil // Keys already exist
+// GenerateKey generates a new AES-256 key if it doesn't exist
+func (km *KeyManager) GenerateKey() error {
+	// Check if key already exists
+	if _, err := os.Stat(km.KeyPath); err == nil {
+		return nil
 	}
 
 	// Create keys directory if it doesn't exist
-	dir := filepath.Dir(km.PublicKeyPath)
+	dir := filepath.Dir(km.KeyPath)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create key directory: %w", err)
 	}
 
-	// Generate private key
-	privateKey, err := rsa.GenerateKey(rand.Reader, km.KeyBits)
-	if err != nil {
-		return fmt.Errorf("failed to generate private key: %w", err)
+	// Generate new key
+	key := make([]byte, AES_KEY_SIZE)
+	if _, err := rand.Read(key); err != nil {
+		return fmt.Errorf("failed to generate key: %w", err)
 	}
 
-	// Convert private key to PEM format
-	privateKeyPEM := &pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
-	}
-
-	// Save private key
-	privateKeyFile, err := os.OpenFile(km.PrivateKeyPath, os.O_CREATE|os.O_WRONLY, 0600)
-	if err != nil {
-		return fmt.Errorf("failed to create private key file: %w", err)
-	}
-	if err := pem.Encode(privateKeyFile, privateKeyPEM); err != nil {
-		privateKeyFile.Close()
-		return fmt.Errorf("failed to write private key: %w", err)
-	}
-	privateKeyFile.Close()
-
-	// Extract public key
-	publicKey := &privateKey.PublicKey
-
-	// Convert public key to PKIX format
-	publicKeyBytes, err := x509.MarshalPKIXPublicKey(publicKey)
-	if err != nil {
-		return fmt.Errorf("failed to marshal public key: %w", err)
-	}
-
-	// Convert to PEM format
-	publicKeyPEM := &pem.Block{
-		Type:  "PUBLIC KEY",
-		Bytes: publicKeyBytes,
-	}
-
-	// Save public key
-	publicKeyFile, err := os.OpenFile(km.PublicKeyPath, os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to create public key file: %w", err)
-	}
-	if err := pem.Encode(publicKeyFile, publicKeyPEM); err != nil {
-		publicKeyFile.Close()
-		return fmt.Errorf("failed to write public key: %w", err)
-	}
-	publicKeyFile.Close()
-
-	return nil
+	// Save key to file
+	return os.WriteFile(km.KeyPath, key, KEY_PERMISSIONS)
 }
 
-// FileEncryptor handles file encryption operations
+// LoadKey loads the AES key from file
+func (km *KeyManager) LoadKey() ([]byte, error) {
+	key, err := os.ReadFile(km.KeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load key: %w", err)
+	}
+	if len(key) != AES_KEY_SIZE {
+		return nil, fmt.Errorf("invalid key size")
+	}
+	return key, nil
+}
+
+// FileEncryptor handles file encryption operations using AES
 type FileEncryptor struct {
 	keyManager *KeyManager
 }
 
-// NewFileEncryptor creates a new file encryptor with the given key manager
+// NewFileEncryptor creates a new file encryptor instance
 func NewFileEncryptor(km *KeyManager) *FileEncryptor {
 	return &FileEncryptor{keyManager: km}
 }
 
-// EncryptFile encrypts a file and saves the encrypted version
-func (fe *FileEncryptor) EncryptFile(inputPath string) ([]byte, error) {
-	// Read input file
-	content, err := os.ReadFile(inputPath)
+// EncryptFile encrypts a file using AES-256 in GCM mode
+func (fe *FileEncryptor) EncryptFile(content []byte) ([]byte, error) {
+	// Load encryption key
+	key, err := fe.keyManager.LoadKey()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read input file: %w", err)
+		return nil, fmt.Errorf("failed to load encryption key: %w", err)
 	}
 
-	// Get public key
-	pubKey, err := ObtainPubKey(fe.keyManager.PublicKeyPath)
+	// Create AES cipher
+	block, err := aes.NewCipher(key)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get public key: %w", err)
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	// Create GCM mode
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	// Generate random nonce
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("failed to generate nonce: %w", err)
 	}
 
 	// Encrypt content
-	encrypted, err := rsa.EncryptOAEP(
-		sha256.New(),
-		rand.Reader,
-		pubKey,
-		content,
-		[]byte(LABEL),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("encryption failed: %w", err)
-	}
-
-	return encrypted, nil
+	// Final format: nonce + encrypted content
+	encryptedContent := gcm.Seal(nonce, nonce, content, nil)
+	return encryptedContent, nil
 }
 
-// 在 main 函数或初始化过程中使用这些功能
-func initEncryption() error {
-	// 创建密钥管理器
-	km := NewKeyManager(
-		"./keys/encryption-private.pem",
-		"./keys/encryption-pub.pem",
-		2048, // 使用2048位的RSA密钥
-	)
-
-	// 生成密钥（如果不存在）
-	if err := km.GenerateKeys(); err != nil {
-		return fmt.Errorf("failed to generate keys: %w", err)
+// DecryptFile decrypts a file encrypted with EncryptFile
+func (fe *FileEncryptor) DecryptFile(encryptedContent []byte) ([]byte, error) {
+	// Load encryption key
+	key, err := fe.keyManager.LoadKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load encryption key: %w", err)
 	}
 
-	return nil
+	// Create AES cipher
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	// Create GCM mode
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	// Extract nonce and ciphertext
+	nonceSize := gcm.NonceSize()
+	if len(encryptedContent) < nonceSize {
+		return nil, fmt.Errorf("encrypted content too short")
+	}
+
+	nonce := encryptedContent[:nonceSize]
+	ciphertext := encryptedContent[nonceSize:]
+
+	// Decrypt content
+	content, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt: %w", err)
+	}
+
+	return content, nil
 }
 
 // StoreFile handles RPC requests to store a file on this node
@@ -1945,61 +1826,6 @@ func CheckAlive(nodeAddress NodeAddress) bool {
 	return err == nil && reply
 }
 
-func FileSending(address string, fileName string, fileContent []byte) error {
-	authMethod, errAuth := ObtainSSHAuthentication(AUTHENTICATION_PRIVATE_KEY_PATH)
-	if errAuth != nil {
-		return fmt.Errorf("failed to load authentication key: %w", errAuth)
-	}
-
-	configuration := &ssh.ClientConfig{
-		User: USER,
-		Auth: []ssh.AuthMethod{
-			authMethod,
-		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         30 * time.Second,
-	}
-
-	fmt.Printf("Connecting to SFTP server at %s...\n", address)
-	con, errCon := ssh.Dial("tcp", address, configuration)
-	if errCon != nil {
-		return fmt.Errorf("SSH connection failed: %w", errCon)
-	}
-	defer con.Close()
-
-	fmt.Printf("Creating SFTP client...\n")
-	client, errClient := sftp.NewClient(con)
-	if errClient != nil {
-		return fmt.Errorf("SFTP client creation failed: %w", errClient)
-	}
-	defer client.Close()
-
-	// 使用文件key作为存储路径的一部分
-	storageDir := "resources"
-	fmt.Printf("Ensuring base storage directory exists: %s\n", storageDir)
-	if err := client.MkdirAll(storageDir); err != nil {
-		return fmt.Errorf("failed to create base directory: %w", err)
-	}
-
-	// 构建完整的文件路径
-	filePath := filepath.Join(storageDir, fileName)
-	fmt.Printf("Creating file: %s\n", filePath)
-	file, errFile := client.Create(filePath)
-	if errFile != nil {
-		return fmt.Errorf("failed to create file: %w", errFile)
-	}
-	defer file.Close()
-
-	fmt.Printf("Writing file content...\n")
-	_, errWrite := file.Write(fileContent)
-	if errWrite != nil {
-		return fmt.Errorf("failed to write file content: %w", errWrite)
-	}
-
-	fmt.Printf("File transfer completed successfully to %s\n", filePath)
-	return nil
-}
-
 // FunctionSchedule is a type for periodic maintenance functions
 type FunctionSchedule func()
 
@@ -2011,140 +1837,4 @@ func Schedule(function FunctionSchedule, t time.Duration) {
 			function()
 		}
 	}()
-}
-
-// SFTPServer represents an SFTP server instance
-type SFTPServer struct {
-	config     *ssh.ServerConfig
-	sshPort    int
-	privateKey ssh.Signer
-}
-
-// NewSFTPServer creates a new SFTP server instance
-func NewSFTPServer(sshPort int) (*SFTPServer, error) {
-	// Read private key
-	privateBytes, err := os.ReadFile(AUTHENTICATION_PRIVATE_KEY_PATH)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read private key: %w", err)
-	}
-
-	// Parse private key
-	private, err := ssh.ParsePrivateKey(privateBytes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse private key: %w", err)
-	}
-
-	// Configure server
-	config := &ssh.ServerConfig{
-		NoClientAuth: true, // Allow no authentication for testing
-	}
-	config.AddHostKey(private)
-
-	return &SFTPServer{
-		config:     config,
-		sshPort:    sshPort,
-		privateKey: private,
-	}, nil
-}
-
-// Start starts the SFTP server
-func (s *SFTPServer) Start() error {
-	// Create listener
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", s.sshPort))
-	if err != nil {
-		return fmt.Errorf("failed to listen on port %d: %w", s.sshPort, err)
-	}
-
-	fmt.Printf("Starting SFTP server on port %d\n", s.sshPort)
-
-	// Handle incoming connections
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				fmt.Printf("Failed to accept incoming connection: %v\n", err)
-				continue
-			}
-
-			go s.handleConnection(conn)
-		}
-	}()
-
-	return nil
-}
-
-func (s *SFTPServer) handleConnection(conn net.Conn) {
-	sshConn, chans, reqs, err := ssh.NewServerConn(conn, s.config)
-	if err != nil {
-		fmt.Printf("SSH handshake failed: %v\n", err)
-		return
-	}
-
-	// 确保连接最终会关闭
-	defer func() {
-		sshConn.Close()
-		conn.Close()
-	}()
-
-	fmt.Printf("New SSH connection from %s\n", sshConn.RemoteAddr())
-
-	// 使用 WaitGroup 来管理所有 goroutine
-	var wg sync.WaitGroup
-
-	// 处理全局请求
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		ssh.DiscardRequests(reqs)
-	}()
-
-	// 处理通道
-	for newChannel := range chans {
-		if newChannel.ChannelType() != "session" {
-			newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
-			continue
-		}
-
-		channel, requests, err := newChannel.Accept()
-		if err != nil {
-			fmt.Printf("Could not accept channel: %v\n", err)
-			continue
-		}
-
-		wg.Add(1)
-		go func(ch ssh.Channel, reqs <-chan *ssh.Request) {
-			defer wg.Done()
-			defer ch.Close()
-
-			for req := range reqs {
-				switch req.Type {
-				case "subsystem":
-					if string(req.Payload[4:]) == "sftp" {
-						req.Reply(true, nil)
-
-						server, err := sftp.NewServer(
-							ch,
-							sftp.WithDebug(os.Stderr),
-						)
-						if err != nil {
-							fmt.Printf("Failed to create SFTP server: %v\n", err)
-							return
-						}
-
-						if err := server.Serve(); err == io.EOF {
-							fmt.Printf("SFTP session completed normally\n")
-						} else if err != nil {
-							fmt.Printf("SFTP session ended with error: %v\n", err)
-						}
-						return
-					}
-				default:
-					req.Reply(false, nil)
-				}
-			}
-		}(channel, requests)
-	}
-
-	// 等待所有 goroutine 完成
-	wg.Wait()
 }

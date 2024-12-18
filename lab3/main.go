@@ -16,6 +16,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -278,11 +279,48 @@ func (flag Flags) CreateNewRingSet() bool {
 }
 
 // Lookup finds the node responsible for a given key in the DHT
+// Now with improved failure handling
 func Lookup(fileKey big.Int) (*NodeInfo, error) {
 	var n = Get()
 	var node, errFind = find(fileKey, n.Info, 32)
 	if errFind != nil {
-		return nil, errFind
+		// If primary node not found, try successors
+		for _, successor := range n.Successors {
+			// Try to get successor's successors list
+			succList, errSucc := Successors(ObtainChordAddress(successor))
+			if errSucc != nil {
+				continue
+			}
+
+			// Try each successor in the list
+			for _, s := range succList {
+				// Check if node is alive
+				if !CheckAlive(ObtainChordAddress(s)) {
+					continue
+				}
+
+				// Get predecessor to check responsibility
+				pred, errPred := Predecessor(ObtainChordAddress(s))
+				if errPred != nil {
+					continue
+				}
+
+				// If no predecessor or we can determine responsibility
+				if pred == nil {
+					// If this is the only node, it's responsible
+					if len(succList) == 1 {
+						return &s, nil
+					}
+					continue
+				}
+
+				// Check if this node is responsible for the file
+				if Between(&pred.Identifier, &fileKey, &s.Identifier, true) {
+					return &s, nil
+				}
+			}
+		}
+		return nil, fmt.Errorf("no responsible node found: %w", errFind)
 	}
 	return node, nil
 }
@@ -295,10 +333,12 @@ func StoreFile(filePath string, ssh bool, encrypted bool) (*NodeInfo, *big.Int, 
 	if errLookup != nil {
 		return nil, nil, errLookup
 	}
+
 	var content, errRead = ReadFile(filePath)
 	if errRead != nil {
 		return nil, nil, errRead
 	}
+
 	if encrypted {
 		var encrypted, errEncryption = Encryption(content)
 		if errEncryption != nil {
@@ -307,16 +347,28 @@ func StoreFile(filePath string, ssh bool, encrypted bool) (*NodeInfo, *big.Int, 
 		content = encrypted
 	}
 	// fmt.Printf("File Storing at %v", *node)
-	if ssh {
-		var fileName = fileKey.String()
-		var errSftp = FileSending(ObtainSshAddress(*node), fileName, content)
-		if errSftp != nil {
-			return nil, nil, errSftp
+
+	// Check if target node is current node
+	var currentNode = Get()
+	if node.Identifier.Cmp(&currentNode.Info.Identifier) == 0 {
+		// Store locally if target is current node
+		err := NodeFileWrite(fileKey.String(), currentNode.Info.Identifier.String(), content)
+		if err != nil {
+			return nil, nil, err
 		}
 	} else {
-		var errRpc = StoreFileClient(ObtainChordAddress(*node), *fileKey, content)
-		if errRpc != nil {
-			return nil, nil, errRpc
+		// Use RPC or SSH for remote nodes
+		if ssh {
+			var fileName = fileKey.String()
+			var errSftp = FileSending(ObtainSshAddress(*node), fileName, content)
+			if errSftp != nil {
+				return nil, nil, errSftp
+			}
+		} else {
+			var errRpc = StoreFileClient(ObtainChordAddress(*node), *fileKey, content)
+			if errRpc != nil {
+				return nil, nil, errRpc
+			}
 		}
 	}
 
@@ -514,12 +566,13 @@ func Leave(n *Node) {
 
 // Stabilize implements the Chord protocol's stabilize operation
 // Periodically verifies node's immediate successor and updates successor list
+// This operation maintains the correct successor pointer and successor list
+// for each node in the Chord ring
 func Stabilize() {
 	var x *NodeInfo
-	var successorIndex = -1
 	var n = Get()
 
-	// If successor list is empty, point to self
+	// If successor list is empty, point to self as the only known node
 	if len(n.Successors) == 0 {
 		NewSuccessor(n.Info)
 		return
@@ -528,19 +581,28 @@ func Stabilize() {
 	// Try to get predecessor from successors with retries
 	var allSuccessorsDown = true
 	maxRetries := 3
+	var currentSuccessor = n.Successors[0] // Keep track of current immediate successor
 
-	// Iterate through successors to find a responsive one
-	for index, item := range n.Successors {
+	// Iterate through successors to find a responsive one and get its predecessor
+	for index, successor := range n.Successors {
 		var err error
+		// Implement retry mechanism for network reliability
 		for retry := 0; retry < maxRetries; retry++ {
-			x, err = Predecessor(ObtainChordAddress(item))
+			x, err = Predecessor(ObtainChordAddress(successor))
 			if err == nil {
-				successorIndex = index
 				allSuccessorsDown = false
+				// Update current successor if we had to fall back to a backup successor
+				if index > 0 {
+					currentSuccessor = successor
+				}
 				break
 			}
 			if retry < maxRetries-1 {
-				time.Sleep(time.Millisecond * 100) // Delay between retries
+				// Wait before retry to avoid overwhelming the network
+				time.Sleep(time.Millisecond * 100)
+			} else {
+				fmt.Printf("[Stabilize] Failed to contact successor %v after %d retries: %v\n",
+					successor.Identifier.String(), maxRetries, err)
 			}
 		}
 		if !allSuccessorsDown {
@@ -548,22 +610,31 @@ func Stabilize() {
 		}
 	}
 
-	// If all successors are unresponsive, point to self
+	// If all known successors are unresponsive, point to self
 	if allSuccessorsDown {
+		fmt.Printf("[Stabilize] All successors appear to be down, falling back to self\n")
 		NewSuccessor(n.Info)
 		return
 	}
 
-	// Update successor if necessary
-	if x != nil && Between(&n.Info.Identifier, &x.Identifier, &n.Successors[successorIndex].Identifier, false) {
-		NewSuccessor(*x)
+	// Update successor pointers if necessary
+	// Case 1: Found a new candidate for immediate successor (x)
+	// Case 2: Current successor's predecessor (x) is better than current successor
+	if x != nil {
+		// Check if x should be our immediate successor
+		if Between(&n.Info.Identifier, &x.Identifier, &currentSuccessor.Identifier, false) {
+			fmt.Printf("[Stabilize] Found better successor: %v\n", x.Identifier.String())
+			NewSuccessor(*x)
+			currentSuccessor = *x
+		}
 	}
 
-	// Notify successor and update successor list if possible
+	// Notify successor and update successor list
 	if NoOfSuccessors() > 0 {
 		var notifySuccess = false
+		// Attempt to notify successor with retries
 		for retry := 0; retry < maxRetries; retry++ {
-			errNotify := ClientNotification(ObtainChordAddress(Successor()), n.Info)
+			errNotify := ClientNotification(ObtainChordAddress(currentSuccessor), n.Info)
 			if errNotify == nil {
 				notifySuccess = true
 				break
@@ -571,18 +642,20 @@ func Stabilize() {
 			if retry < maxRetries-1 {
 				time.Sleep(time.Millisecond * 100)
 			} else {
-				fmt.Printf("[stabilze] Error found while notifying successor %v after %d retries, message: %v\n",
-					Successor(), maxRetries, errNotify.Error())
+				fmt.Printf("[Stabilize] Failed to notify successor %v after %d retries: %v\n",
+					currentSuccessor.Identifier.String(), maxRetries, errNotify)
 			}
 		}
 
+		// If notification was successful, try to update successor list
 		if notifySuccess {
 			var successors []NodeInfo
 			var fetchSuccess = false
 
+			// Attempt to get successor's successor list with retries
 			for retry := 0; retry < maxRetries; retry++ {
 				var errSuc error
-				successors, errSuc = Successors(ObtainChordAddress(Successor()))
+				successors, errSuc = Successors(ObtainChordAddress(currentSuccessor))
 				if errSuc == nil {
 					fetchSuccess = true
 					break
@@ -590,13 +663,33 @@ func Stabilize() {
 				if retry < maxRetries-1 {
 					time.Sleep(time.Millisecond * 100)
 				} else {
-					fmt.Printf("[stabilize] Error found while fetching node successors from successor %v after %d retries, message: %v\n",
-						Successor(), maxRetries, errSuc.Error())
+					fmt.Printf("[Stabilize] Failed to fetch successor list from %v after %d retries: %v\n",
+						currentSuccessor.Identifier.String(), maxRetries, errSuc)
 				}
 			}
 
+			// Update local successor list if we successfully got successor's list
 			if fetchSuccess && len(successors) > 0 {
-				AddSuccessors(successors)
+				// Create a new list starting with our immediate successor
+				var newSuccessors = []NodeInfo{currentSuccessor}
+
+				// Add successors from our successor's list
+				for _, s := range successors {
+					// Don't add ourselves to the list
+					if s.Identifier.Cmp(&n.Info.Identifier) != 0 {
+						newSuccessors = append(newSuccessors, s)
+					}
+				}
+
+				// Trim the list to maximum size while ensuring at least one successor
+				if len(newSuccessors) > n.SuccessorsSize {
+					newSuccessors = newSuccessors[:n.SuccessorsSize]
+				}
+
+				// Update the successor list
+				instance.Successors = newSuccessors
+
+				//fmt.Printf("[Stabilize] Updated successor list, length: %d\n", len(instance.Successors))
 			}
 		}
 	}
@@ -618,16 +711,40 @@ func Notify(node NodeInfo) {
 // FixFingers implements the Chord protocol's fix_fingers operation
 // Periodically refreshes entries in the finger table
 func FixFingers() {
-	var next = NextFingerUpdation()
-	// fmt.Printf("[fixFingers] next: %v", next)
 	var n = Get()
-	var identifierToFix = *Jump(n.Info.Identifier, next)
-	var node, err = find(identifierToFix, n.Info, 32)
+	next := NextFingerUpdation()
+
+	// Calculate the identifier for this finger table entry
+	identifierToFix := *Jump(n.Info.Identifier, next)
+
+	// Maximum number of retries
+	maxRetries := 3
+	var node *NodeInfo
+	var err error
+
+	// Try to find the responsible node with retries
+	for retry := 0; retry < maxRetries; retry++ {
+		node, err = find(identifierToFix, n.Info, 32)
+		if err == nil {
+			break
+		}
+		if retry < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100)
+		}
+	}
+
 	if err != nil {
-		// fmt.Printf("[fixFingers] Error observed while configuring finger table index %v equating the identifier %v+2^(%v)=%v. errmsg: %v\n", next, n.Info.Identifier, next, identifierToFix, err.Error())
+		fmt.Printf("[FixFingers] Failed to find node for finger[%d] = %v after %d retries: %v\n",
+			next, identifierToFix.String(), maxRetries, err)
 		return
 	}
-	DefineFingerTableIndex(next, *node)
+
+	// Update the finger table entry
+	if err := DefineFingerTableIndex(next, *node); err != nil {
+		//fmt.Printf("[FixFingers] Failed to update finger[%d]: %v\n", next, err)
+	} else {
+		//fmt.Printf("[FixFingers] Updated finger[%d] = %v\n", next, node.Identifier.String())
+	}
 }
 
 // CheckPredecessor implements the Chord protocol's check_predecessor operation
@@ -795,14 +912,44 @@ func NextFingerUpdation() int {
 	return instance.NextFinger
 }
 
-// NewSuccessor updates the node's immediate successor
+// NewSuccessor updates the node's successor list
 func NewSuccessor(successor NodeInfo) {
-	instance.Successors = []NodeInfo{successor}
+	// 不要清空现有的后继列表，而是更新第一个后继
+	if len(instance.Successors) == 0 {
+		instance.Successors = []NodeInfo{successor}
+	} else {
+		// 如果successor已经在列表中且不是第一个，需要调整顺序
+		found := false
+		for i, s := range instance.Successors {
+			if s.Identifier.Cmp(&successor.Identifier) == 0 {
+				if i != 0 { // 如果不是第一个位置，需要移动到第一个位置
+					// 删除当前位置
+					instance.Successors = append(instance.Successors[:i], instance.Successors[i+1:]...)
+					// 插入到第一个位置
+					instance.Successors = append([]NodeInfo{successor}, instance.Successors...)
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			// 如果是新的successor，插入到第一个位置
+			instance.Successors = append([]NodeInfo{successor}, instance.Successors...)
+		}
+		// 确保列表不超过最大长度
+		if len(instance.Successors) > instance.SuccessorsSize {
+			instance.Successors = instance.Successors[:instance.SuccessorsSize]
+		}
+	}
 }
 
-// NewFingerTable initializes the finger table with a single entry
+// NewFingerTable initializes the finger table with proper size
 func NewFingerTable(successor NodeInfo) {
-	instance.FingerTable = []NodeInfo{successor}
+	// Initialize finger table with successor for all entries
+	instance.FingerTable = make([]NodeInfo, instance.FingerTableSize)
+	for i := 0; i < instance.FingerTableSize; i++ {
+		instance.FingerTable[i] = successor
+	}
 }
 
 // SuccesorsContainsItself checks if the node itself appears in the successor list
@@ -817,24 +964,51 @@ func SuccesorsContainsItself(successors []NodeInfo) int {
 }
 
 // AddSuccessors updates the successor list while maintaining size limits
-// Excludes self from the successor list if present
 func AddSuccessors(successors []NodeInfo) {
-	var noOfElementsToAdd = instance.SuccessorsSize - 1
-	var elementsAddition []NodeInfo
-	// In case the successors array is shorter than the amount of elements to add, the slicing would produce a kernel panic
-	// Handle case where input array is shorter than required
-	if len(successors) > noOfElementsToAdd {
-		elementsAddition = successors[:noOfElementsToAdd]
-	} else {
-		elementsAddition = successors
+	if len(successors) == 0 {
+		return
 	}
-	// Remove self from successor list if present
-	var index = SuccesorsContainsItself(elementsAddition)
-	if index != -1 {
-		elementsAddition = elementsAddition[:index]
+
+	// 移除自己（如果存在）
+	var filteredSuccessors []NodeInfo
+	for _, s := range successors {
+		if s.Identifier.Cmp(&instance.Info.Identifier) != 0 {
+			filteredSuccessors = append(filteredSuccessors, s)
+		}
+	}
+
+	// 合并当前successors和新的successors
+	var mergedList []NodeInfo
+	existingMap := make(map[string]bool)
+
+	// 首先添加当前的第一个successor（如果有的话）
+	if len(instance.Successors) > 0 {
+		mergedList = append(mergedList, instance.Successors[0])
+		existingMap[instance.Successors[0].Identifier.String()] = true
+	}
+
+	// 添加新的successors
+	for _, s := range filteredSuccessors {
+		if !existingMap[s.Identifier.String()] {
+			mergedList = append(mergedList, s)
+			existingMap[s.Identifier.String()] = true
+		}
+	}
+
+	// 添加剩余的当前successors
+	for i := 1; i < len(instance.Successors); i++ {
+		if !existingMap[instance.Successors[i].Identifier.String()] {
+			mergedList = append(mergedList, instance.Successors[i])
+			existingMap[instance.Successors[i].Identifier.String()] = true
+		}
+	}
+
+	// 限制列表大小
+	if len(mergedList) > instance.SuccessorsSize {
+		mergedList = mergedList[:instance.SuccessorsSize]
 	}
 	// fmt.Printf("Present successor is %v, new successors being added: %v\n", instance.Successors[0], elementsAddition)
-	instance.Successors = append(instance.Successors, elementsAddition...)
+	instance.Successors = mergedList
 }
 
 // Successor returns the node's current successor
@@ -848,20 +1022,13 @@ func NoOfSuccessors() int {
 }
 
 // DefineFingerTableIndex updates a specific finger table entry
-// Ensures finger table grows sequentially
-// Set the index of an element if the previous index exists
-// This is a simplification due to the fact that the FixFingers method
-// adds elements to the list one at a time in an increasing order.
 func DefineFingerTableIndex(index int, item NodeInfo) error {
-	if index >= instance.FingerTableSize || index > len(instance.FingerTable) {
-		return errors.New("index above size, or element at index: " + fmt.Sprintf("%v", index-1) + " does not exist")
+	if index >= instance.FingerTableSize {
+		return fmt.Errorf("index %d exceeds finger table size %d", index, instance.FingerTableSize)
 	}
-	if index < len(instance.FingerTable) {
-		instance.FingerTable[index] = item
-		return nil
-	}
-	// Index == length of fingertable
-	instance.FingerTable = append(instance.FingerTable, item)
+
+	// Simply update the entry at the given index
+	instance.FingerTable[index] = item
 	return nil
 }
 
@@ -1058,10 +1225,132 @@ func ReadFile(filePath string) ([]byte, error) {
 	return file, errRead
 }
 
-// ReadNodeFile reads a file from a node's storage directory
+// ReadNodeFile reads a file from a node's storage
+// If local read fails, try to read from successors
 func ReadNodeFile(nodeKey, fileKey string) ([]byte, error) {
-	var file, errRead = os.ReadFile(ObtainFilePath(fileKey, nodeKey))
-	return file, errRead
+	// First try to read locally
+	content, err := os.ReadFile(ObtainFilePath(fileKey, nodeKey))
+	if err == nil {
+		return content, nil
+	}
+
+	// If local read fails and this is the responsible node,
+	// try to read from successors
+	var n = Get()
+	if n.Info.Identifier.String() == nodeKey {
+		// Try each successor
+		for _, successor := range n.Successors {
+			content, errRemote := ReadRemoteFile(successor, fileKey)
+			if errRemote == nil {
+				return content, nil
+			}
+			// Log the error but continue trying other successors
+			fmt.Printf("Failed to read from successor %v: %v\n",
+				successor.Identifier.String(), errRemote)
+		}
+	}
+
+	return nil, fmt.Errorf("file not found in primary or backup nodes")
+}
+
+// ReadRemoteFile attempts to read a file from a remote node
+func ReadRemoteFile(node NodeInfo, fileKey string) ([]byte, error) {
+	// Try RPC first
+	content, err := ReadFileRPC(ObtainChordAddress(node), fileKey)
+	if err == nil {
+		return content, nil
+	}
+
+	// If RPC fails, try SFTP
+	return ReadFileSFTP(ObtainSshAddress(node), fileKey)
+}
+
+// ReadFileRPC reads a file from a remote node using RPC
+func ReadFileRPC(nodeAddress NodeAddress, fileKey string) ([]byte, error) {
+	var reply FileContentReply
+	err := handleCall(nodeAddress, "ChordRPCHandler.ReadFile", &fileKey, &reply)
+	if err != nil {
+		return nil, err
+	}
+	return reply.Content, nil
+}
+
+// ReadFileSFTP reads a file from a remote node using SFTP
+func ReadFileSFTP(address, fileKey string) ([]byte, error) {
+	// Set up SSH client configuration
+	authMethod, err := ObtainSSHAuthentication(AUTHENTICATION_PRIVATE_KEY_PATH)
+	if err != nil {
+		return nil, err
+	}
+
+	keyContent, err := ObtainKeyBytes(AUTHENTICATION_PUBLIC_KEY_PATH)
+	if err != nil {
+		return nil, err
+	}
+
+	publicKey, _, _, _, err := ssh.ParseAuthorizedKey(keyContent)
+	if err != nil {
+		return nil, err
+	}
+
+	pubKey, err := ssh.ParsePublicKey(publicKey.Marshal())
+	if err != nil {
+		return nil, err
+	}
+
+	config := ssh.ClientConfig{
+		User:            USER,
+		Auth:            []ssh.AuthMethod{authMethod},
+		HostKeyCallback: ssh.FixedHostKey(pubKey),
+	}
+
+	// Connect to remote server
+	conn, err := ssh.Dial("tcp", address, &config)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	// Create SFTP client
+	client, err := sftp.NewClient(conn)
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+
+	// Open and read the file
+	filePath := filepath.Join("resources", fileKey)
+	file, err := client.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	return io.ReadAll(file)
+}
+
+// Add new RPC handler for file reading
+type FileContentReply struct {
+	Content []byte
+}
+
+// RPC handler for file reading
+func (t *ChordRPCHandler) ReadFile(fileKey *string, reply *FileContentReply) error {
+	if fileKey == nil {
+		return fmt.Errorf("invalid file key")
+	}
+	// Get() returns Node, which contains Info.Identifier as big.Int
+	// We need to get the pointer to call String()
+	n := Get()
+	nodeKeyInt := &n.Info.Identifier // Get pointer to big.Int
+	nodeKey := nodeKeyInt.String()   // Now correctly call String() on pointer
+
+	content, err := os.ReadFile(ObtainFilePath(*fileKey, nodeKey))
+	if err != nil {
+		return fmt.Errorf("failed to read file: %w", err)
+	}
+	reply.Content = content
+	return nil
 }
 
 // NodeFilesRead reads multiple files from a node's storage
@@ -1169,9 +1458,14 @@ func Hash(elt string) *big.Int {
 // Jump calculates (n + 2^fingerentry) mod 2^m
 // Used for finger table calculations
 func Jump(nodeIdentifier big.Int, fingerentry int) *big.Int {
+	// Calculate 2^fingerentry
 	var fingerentryBig = big.NewInt(int64(fingerentry))
 	var jump = new(big.Int).Exp(two, fingerentryBig, nil)
+
+	// Calculate n + 2^fingerentry
 	var sum = new(big.Int).Add(&nodeIdentifier, jump)
+
+	// Take modulo 2^m
 	return new(big.Int).Mod(sum, hashMod)
 }
 
@@ -1387,6 +1681,12 @@ func ClientNotification(notifiee NodeAddress, notifier NodeInfo) error {
 
 // StoreFileClient sends a request to store a file on a remote node
 func StoreFileClient(nodeAddress NodeAddress, fileKey big.Int, content []byte) error {
+	// 确保只对远程节点使用 RPC
+	var currentNode = Get()
+	if string(nodeAddress) == fmt.Sprintf("%v:%v", currentNode.Info.IpAddress, currentNode.Info.ChordPort) {
+		return NodeFileWrite(fileKey.String(), currentNode.Info.Identifier.String(), content)
+	}
+
 	var reply string
 	var args = StoreFileArgs{Key: fileKey, Content: content}
 	var err = handleCall(nodeAddress, "ChordRPCHandler.StoreFile", &args, &reply)

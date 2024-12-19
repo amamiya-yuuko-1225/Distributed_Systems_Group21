@@ -22,7 +22,7 @@ docker rm -f $(docker ps -aq)
 DEMO PROCEDURE:
 1. create ring
 2. join
-3. store a from A to B
+3. store a from A to B: s /home/a.txt f t
 4. lookup a from A, print orginal text
 5. lookup a from B, print encrypted text
 6. B leave, A look up a, get backup successfully 

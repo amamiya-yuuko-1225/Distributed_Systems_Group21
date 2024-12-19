@@ -1326,21 +1326,15 @@ func ReadNodeFile(nodeKey, fileKey string) ([]byte, error) {
 			return fileContent.Content, nil
 		}
 
-		// If current node is the upload node, attempt decryption
-		if fileContent.Metadata.UploadNodeID == currentNodeID {
-			fmt.Println("Decryted content:")
-			km := NewKeyManager(currentNodeID)
-			fe := NewFileEncryptor(km)
+		km := NewKeyManager(currentNodeID)
+		fe := NewFileEncryptor(km)
 
-			decryptedContent, err := fe.DecryptFile(fileContent.Content)
-			if err != nil {
-				return nil, fmt.Errorf("decryption failed: %w", err)
-			}
-			return decryptedContent, nil
+		// try decryption.
+		decryptedContent, err := fe.DecryptFile(fileContent.Content)
+		if err != nil {
+			return fileContent.Content, nil
 		}
-
-		// For non-upload nodes, return encrypted content
-		return fileContent.Content, nil
+		return decryptedContent, nil
 	}
 
 	// Try reading from the specified node's directory

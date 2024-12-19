@@ -43,9 +43,6 @@ const (
 	KEY_PERMISSIONS = 0600
 )
 
-var km *KeyManager
-var fe *FileEncryptor
-
 // File system related constants
 const (
 	// Base directory for storing DHT resources
@@ -136,7 +133,7 @@ func main() {
 	}
 
 	// Initialize node-specific key management
-	km = NewKeyManager(nodeIdentifier.String())
+	km := NewKeyManager(nodeIdentifier.String())
 	if err := km.GenerateKey(); err != nil {
 		fmt.Printf("Encryption initialization error: %v\n", err)
 		return
@@ -383,7 +380,7 @@ func StoreFile(filePath string, encrypted bool) (*NodeInfo, *big.Int, error) {
 	currentNode := Get()
 	nodeID := currentNode.Info.Identifier.String()
 
-	// Calculate file identifier
+	// Calculate file identifier using file name
 	fileName := GetFileName(filePath)
 	fileKey := Hash(fileName)
 
@@ -393,45 +390,40 @@ func StoreFile(filePath string, encrypted bool) (*NodeInfo, *big.Int, error) {
 		return nil, nil, fmt.Errorf("lookup failed: %w", errLookup)
 	}
 
-	// Read the file content
+	// Read the original file content
 	content, errRead := ReadFile(filePath)
 	if errRead != nil {
 		return nil, nil, fmt.Errorf("failed to read file: %w", errRead)
 	}
 
-	// Create file metadata
-	metadata := FileMetadata{
-		UploadNodeID: nodeID,
-		Encrypted:    encrypted,
-		Timestamp:    time.Now(),
+	// Create the FileContent structure with metadata
+	fileContent := FileContent{
+		Metadata: FileMetadata{
+			UploadNodeID: nodeID,     // Store the original uploader's ID
+			Encrypted:    encrypted,  // Record encryption status
+			Timestamp:    time.Now(), // Record storage time
+		},
+		Content: content, // Initially store unencrypted content
 	}
 
 	// Handle encryption if requested
 	if encrypted {
 		// Initialize key management for the current node
+		km := NewKeyManager(nodeID)
 		if err := km.GenerateKey(); err != nil {
 			return nil, nil, fmt.Errorf("failed to initialize encryption: %w", err)
 		}
 
 		// Create encryptor and encrypt content
-		if fe == nil {
-			fe = NewFileEncryptor(km)
-		}
-
+		fe := NewFileEncryptor(km)
 		encryptedContent, err := fe.EncryptFile(content)
 		if err != nil {
 			return nil, nil, fmt.Errorf("encryption failed: %w", err)
 		}
-		content = encryptedContent
+		fileContent.Content = encryptedContent // Replace with encrypted content
 	}
 
-	// Prepare the complete file content structure
-	fileContent := FileContent{
-		Metadata: metadata,
-		Content:  content,
-	}
-
-	// Serialize the content structure
+	// Serialize the complete FileContent structure
 	serializedContent, err := json.Marshal(fileContent)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to serialize file content: %w", err)
@@ -472,7 +464,7 @@ func validateFilePath(path string) error {
 	if err != nil {
 		return fmt.Errorf("cannot open file: %w", err)
 	}
-	file.Close()
+	defer file.Close()
 
 	return nil
 }
@@ -558,31 +550,38 @@ func FindSuccessor(id big.Int) (bool, NodeInfo) {
 	var n = Get()
 	// Check if id falls between current node and its immediate successor
 	if Between(&n.Info.Identifier, &id, &n.Successors[0].Identifier, true) {
-		// fmt.Printf("[findSuccessor] Nodeid: %v, return value: %v, %v", id, true, n.Successors[0])
+		//fmt.Printf("ID is between current node and its successor\n")
 		return true, n.Successors[0]
 	}
 	// Otherwise, return the closest preceding node
-	var NearestNode = NearestPrecedingNode(id)
-	// fmt.Printf("[findSuccessor] Nodeid: %v, return value: %v, %v", id, false, NearestNode)
-	return false, NearestNode
+	return false, NearestPrecedingNode(id)
 }
 
-// find iteratively looks for the successor of an identifier
-// Implements the Chord protocol's find_successor operation with a maximum step limit
 func find(id big.Int, start NodeInfo, maxSteps int) (*NodeInfo, error) {
 	var found = false
 	var nextNode = start
+
+	//fmt.Printf("Starting find for ID: %v from node: %v\n",id.String(), start.Identifier.String())
+
 	for i := 0; i < maxSteps; i++ {
+		//fmt.Printf("Step %d: Checking node: %v\n", i, nextNode.Identifier.String())
+
 		var res, err = ClientLocateSuccessor(ObtainChordAddress(nextNode), &id)
 		if err != nil {
+			fmt.Printf("Error in step %d: %v\n", i, err)
 			return nil, err
 		}
+
 		found = res.Found
 		if found {
+			//fmt.Printf("Found responsible node: %v\n", res.Node.Identifier.String())
 			return &res.Node, nil
 		}
+
 		nextNode = res.Node
+		//fmt.Printf("Moving to next node: %v\n", nextNode.Identifier.String())
 	}
+
 	return nil, errors.New("Successors Could not be found")
 }
 
@@ -599,20 +598,41 @@ func locateNearestPrecedingCandidate(n Node, table []NodeInfo, id big.Int) *Node
 
 // NearestPrecedingNode finds the closest preceding node for a given identifier
 // Implements the Chord protocol's closest_preceding_node operation
+//
+//	func NearestPrecedingNode(id big.Int) NodeInfo {
+//		var n = Get()
+//		// Check finger table first
+//		var candidate *NodeInfo = locateNearestPrecedingCandidate(n, n.FingerTable, id)
+//		// Then check successor list
+//		if c := locateNearestPrecedingCandidate(n, n.Successors, id); candidate == nil || (c != nil &&
+//			Between(&id, &c.Identifier, &candidate.Identifier, false)) {
+//			candidate = c
+//		}
+//		if candidate != nil {
+//			// fmt.Printf("[NearestPrecedingNode] Nodeid: %v, return value: %v\n", id, *candidate)
+//			return *candidate
+//		}
+//		// fmt.Printf("[NearestPrecedingNode] Nodeid: %v, return value: %v\n", id, n.Info)
+//		return n.Info
+//	}
 func NearestPrecedingNode(id big.Int) NodeInfo {
 	var n = Get()
-	// Check finger table first
-	var candidate *NodeInfo = locateNearestPrecedingCandidate(n, n.FingerTable, id)
-	// Then check successor list
-	if c := locateNearestPrecedingCandidate(n, n.Successors, id); candidate == nil || (c != nil &&
-		Between(&id, &c.Identifier, &candidate.Identifier, false)) {
-		candidate = c
+
+	// 从后往前遍历 finger table
+	for i := len(n.FingerTable) - 1; i >= 0; i-- {
+		// 检查 finger table 中的节点是否还活着
+		if !CheckAlive(ObtainChordAddress(n.FingerTable[i])) {
+			continue
+		}
+
+		// 检查这个节点是否在当前节点和目标 id 之间
+		if Between(&n.Info.Identifier, &n.FingerTable[i].Identifier, &id, false) {
+			//fmt.Printf("Found nearest node in finger table[%d]: %s\n",i, n.FingerTable[i].Identifier.String())
+			return n.FingerTable[i]
+		}
 	}
-	if candidate != nil {
-		// fmt.Printf("[NearestPrecedingNode] Nodeid: %v, return value: %v\n", id, *candidate)
-		return *candidate
-	}
-	// fmt.Printf("[NearestPrecedingNode] Nodeid: %v, return value: %v\n", id, n.Info)
+
+	// 如果 finger table 中没有合适的节点，返回当前节点
 	return n.Info
 }
 
@@ -841,9 +861,7 @@ func FixFingers() {
 
 	// Update the finger table entry
 	if err := DefineFingerTableIndex(next, *node); err != nil {
-		//fmt.Printf("[FixFingers] Failed to update finger[%d]: %v\n", next, err)
-	} else {
-		//fmt.Printf("[FixFingers] Updated finger[%d] = %v\n", next, node.Identifier.String())
+		fmt.Printf("[FixFingers] Failed to update finger[%d]: %v\n", next, err)
 	}
 }
 
@@ -898,15 +916,17 @@ func filterAvailableFiles(files []string, predecessorIdentifier big.Int, nodeIde
 
 // FileBackup implements periodic file backup to successor nodes
 // Ensures data redundancy in the DHT
+// FileBackup implements periodic file backup to successor nodes
 func FileBackup() {
 	var n = Get()
 	if n.Predecessor == nil {
 		return
 	}
-	// fmt.Printf("[chordFunctions.FileBackup] Requested")
+
 	// Acquire lock for file operations
 	ObtainRWLock(false)
-	// fmt.Printf("[chordFunctions.FileBackup] ReadWrite lock obtained ")
+	defer LiberateRWLock(false)
+
 	var successors = n.Successors
 	var nodeKey = n.Info.Identifier.String()
 	var f, err = ListFiles(nodeKey)
@@ -914,39 +934,43 @@ func FileBackup() {
 	// Filter files that should be backed up
 	var ownedFiles = filterAvailableFiles(f, n.Predecessor.Identifier, n.Info.Identifier)
 	if err != nil || len(ownedFiles) <= 0 || len(n.Successors) <= 0 {
-		LiberateRWLock(false)
 		return
 	}
-	//fmt.Printf("[chordFunctions.FileBackup] Available Files in the system: %v\n", ownedFiles)
 
 	// Check which successors are missing which files
 	var unavailableFiles = ObtainMissingFiles(successors, ownedFiles)
-	var fls = NodeFilesRead(nodeKey, ownedFiles)
-	//fmt.Printf("[chordFunctions.FileBackup] Files Missing for Successors: %v\n", unavailableFiles)
+
+	// Read files with their complete FileContent structure
+	var fls = make(map[string]*[]byte)
+	for _, filename := range ownedFiles {
+		content, err := os.ReadFile(filepath.Join(ObtainFileDir(nodeKey), filename))
+		if err == nil {
+			fls[filename] = &content
+		}
+	}
 
 	// Concurrently transfer missing files to successors
 	var wg = new(sync.WaitGroup)
 	wg.Add(len(successors))
-	for index, item := range successors {
+	for index, successor := range successors {
 		go func(i int, node NodeInfo) {
+			defer wg.Done()
+
 			var filesToTransfer = map[string]*[]byte{}
 			if i < len(unavailableFiles) {
 				for _, missingFile := range unavailableFiles[i] {
-					var file, ok = fls[missingFile]
-					if ok {
-						filesToTransfer[missingFile] = file
+					if content, ok := fls[missingFile]; ok {
+						// 直接传输原始内容（包含 FileContent 结构）
+						filesToTransfer[missingFile] = content
 					}
 				}
 				if len(filesToTransfer) > 0 {
 					FileTransfer(ObtainChordAddress(node), filesToTransfer)
 				}
 			}
-			wg.Done()
-		}(index, item)
+		}(index, successor)
 	}
 	wg.Wait()
-
-	LiberateRWLock(false)
 }
 
 // Singleton instance for the Chord node
@@ -999,6 +1023,7 @@ func ObtainChordAddress(node NodeInfo) NodeAddress {
 // Implements round-robin updating of finger table entries
 func NextFingerUpdation() int {
 	instance.NextFinger = (instance.NextFinger + 1) % instance.FingerTableSize
+	//fmt.Printf("Next finger to update: %d\n", instance.NextFinger)
 	return instance.NextFinger
 }
 
@@ -1305,67 +1330,63 @@ func ReadFile(filePath string) ([]byte, error) {
 	return file, errRead
 }
 
-// ReadNodeFile reads and potentially decrypts a file from the DHT
 // Now checks only node-specific directories
+// ReadNodeFile reads and potentially decrypts a file from the DHT
 func ReadNodeFile(nodeKey, fileKey string) ([]byte, error) {
 	var currentNode = Get()
+	var currentNodeID = currentNode.Info.Identifier.String()
 
-	// Helper function to read and parse file content
-	readAndParseFile := func(path string) ([]byte, error) {
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read file: %w", err)
-		}
-
-		// Try to parse as FileContent structure
+	// Helper function to read and try decrypt content
+	readAndTryDecrypt := func(content []byte) ([]byte, error) {
+		// 尝试解析为 FileContent 结构
 		var fileContent FileContent
 		if err := json.Unmarshal(content, &fileContent); err != nil {
-			// If parsing fails, might be an old format file
-			// Return content as-is for backward compatibility
+			// 如果不是 JSON 格式，直接返回原内容
 			return content, nil
 		}
 
-		if fe == nil {
-			fe = NewFileEncryptor(km)
-		}
-
-		// try decryption.
-		decryptedContent, err := fe.DecryptFile(fileContent.Content)
-		if err != nil {
-			fmt.Println("decryption failed", err)
+		// 如果文件没有加密，直接返回内容
+		if !fileContent.Metadata.Encrypted {
 			return fileContent.Content, nil
 		}
-		return decryptedContent, nil
+
+		// 如果当前节点是原始上传节点，尝试解密
+		if fileContent.Metadata.UploadNodeID == currentNodeID {
+			km := NewKeyManager(currentNodeID)
+			fe := NewFileEncryptor(km)
+
+			decryptedContent, err := fe.DecryptFile(fileContent.Content)
+			if err != nil {
+				return nil, fmt.Errorf("decryption failed: %v", err)
+			}
+			return decryptedContent, nil
+		}
+
+		// 如果不是上传节点，返回加密内容
+		return fileContent.Content, nil
 	}
 
-	// Try reading from the specified node's directory
-	nodePath := filepath.Join("resources", nodeKey, fileKey)
-	if content, err := readAndParseFile(nodePath); err == nil {
-		return content, nil
+	// 首先尝试从指定节点的目录读取
+	nodePath := filepath.Join("./resources", nodeKey, fileKey)
+	if content, err := os.ReadFile(nodePath); err == nil {
+		return readAndTryDecrypt(content)
 	}
 
-	// If file not found and we're looking for a file that should be on this node,
-	// try reading from successor nodes
+	// 如果本地读取失败，尝试从其他节点读取
 	for _, successor := range currentNode.Successors {
-		fmt.Printf("Attempting to read from successor node: %s\n",
-			successor.Identifier.String())
-
 		content, err := ReadRemoteFile(successor, fileKey)
 		if err == nil {
-			// Save a local copy and process it
-			_ = os.MkdirAll(filepath.Join("resources", nodeKey), PERMISSIONS_DIR)
-			_ = NodeFileWrite(fileKey, nodeKey, content)
-			return readAndParseFile(filepath.Join("resources", nodeKey, fileKey))
+			return readAndTryDecrypt(content)
 		}
 	}
 
-	return nil, fmt.Errorf("file not found: %s", fileKey)
+	return nil, fmt.Errorf("file not found in any location: %s", fileKey)
 }
 
 // ReadRemoteFile attempts to read a file from a remote node
 func ReadRemoteFile(node NodeInfo, fileKey string) ([]byte, error) {
 	// 构建远程文件的完整路径
-	remoteFilePath := filepath.Join(FOLDER_RESOURCES, node.Identifier.String(), fileKey)
+	remoteFilePath := filepath.Join("resources", node.Identifier.String(), fileKey)
 	fmt.Printf("Attempting to read remote file: %s\n", remoteFilePath)
 
 	// 尝试通过 RPC 读取
@@ -1389,20 +1410,15 @@ type FileContentReply struct {
 
 // RPC handler for file reading
 func (t *ChordRPCHandler) ReadFile(fileKey *string, reply *FileContentReply) error {
-	if fileKey == nil {
-		return fmt.Errorf("invalid file key")
-	}
-
 	n := Get()
-	nodeKeyInt := &n.Info.Identifier
-	nodeKey := nodeKeyInt.String()
+	nodeKey := n.Info.Identifier.String()
 
 	content, err := os.ReadFile(ObtainFilePath(*fileKey, nodeKey))
 	if err != nil {
-		return fmt.Errorf("failed to read file: %w", err)
+		return err
 	}
 
-	// 不在RPC层进行解密，保持原始加密状态传输
+	// 直接返回文件内容，不做任何处理
 	reply.Content = content
 	return nil
 }
@@ -1522,7 +1538,15 @@ func Jump(nodeIdentifier big.Int, fingerentry int) *big.Int {
 	var sum = new(big.Int).Add(&nodeIdentifier, jump)
 
 	// Take modulo 2^m
-	return new(big.Int).Mod(sum, hashMod)
+	// 取模
+	var result = new(big.Int).Mod(sum, hashMod)
+
+	//fmt.Printf("Jump calculation for finger[%d]:\n", fingerentry)
+	//fmt.Printf("  Node ID: %s\n", nodeIdentifier.String())
+	//fmt.Printf("  2^%d = %s\n", fingerentry, jump.String())
+	//fmt.Printf("  Result: %s\n", result.String())
+
+	return result
 }
 
 // Between checks if an element falls between two points in the identifier circle
@@ -1613,7 +1637,7 @@ func (t *ChordRPCHandler) Notify(args *NodeInfo, reply *string) error {
 // KeyManager handles AES key generation and management
 type KeyManager struct {
 	KeyPath string
-	NodeID  string // 添加节点ID标识
+	NodeID  string
 }
 
 // NewKeyManager creates a new key manager instance
@@ -1626,6 +1650,14 @@ func NewKeyManager(nodeID string) *KeyManager {
 
 // GenerateKey generates a new AES-256 key if it doesn't exist
 func (km *KeyManager) GenerateKey() error {
+	// Only generate key if this is the current node
+	currentNode := Get()
+	currentNodeID := currentNode.Info.Identifier.String()
+
+	if km.NodeID != currentNodeID {
+		return nil // Skip key generation for other nodes
+	}
+
 	// Check if key already exists
 	if _, err := os.Stat(km.KeyPath); err == nil {
 		return nil
@@ -1648,7 +1680,17 @@ func (km *KeyManager) GenerateKey() error {
 }
 
 // LoadKey loads the AES key from file
+// Now only loads key if it's the current node's key
 func (km *KeyManager) LoadKey() ([]byte, error) {
+	// Only allow loading key for current node
+	currentNode := Get()
+	currentNodeID := currentNode.Info.Identifier.String()
+
+	if km.NodeID != currentNodeID {
+		return nil, fmt.Errorf("unauthorized: cannot load key for node %s (current node: %s)",
+			km.NodeID, currentNodeID)
+	}
+
 	key, err := os.ReadFile(km.KeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load key: %w", err)

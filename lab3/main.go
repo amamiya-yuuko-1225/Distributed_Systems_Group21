@@ -1321,11 +1321,6 @@ func ReadNodeFile(nodeKey, fileKey string) ([]byte, error) {
 			return content, nil
 		}
 
-		// If file is not encrypted, return content directly
-		if !fileContent.Metadata.Encrypted {
-			return fileContent.Content, nil
-		}
-
 		km := NewKeyManager(currentNodeID)
 		fe := NewFileEncryptor(km)
 

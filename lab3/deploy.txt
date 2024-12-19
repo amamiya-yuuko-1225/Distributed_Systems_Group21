@@ -19,7 +19,6 @@ docker run -it -v /home/ubuntu:/home -e ADDRESS="" -e JOIN_ADDRESS="" -e JOIN_PO
 docker rm -f $(docker ps -aq)
 
 
-
 DEMO PROCEDURE:
 1. create ring
 2. join

@@ -1328,6 +1328,7 @@ func ReadNodeFile(nodeKey, fileKey string) ([]byte, error) {
 
 		// If current node is the upload node, attempt decryption
 		if fileContent.Metadata.UploadNodeID == currentNodeID {
+			fmt.Println("Decryted content:")
 			km := NewKeyManager(currentNodeID)
 			fe := NewFileEncryptor(km)
 

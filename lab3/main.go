@@ -43,6 +43,8 @@ const (
 	KEY_PERMISSIONS = 0600
 )
 
+var km *KeyManager
+
 // File system related constants
 const (
 	// Base directory for storing DHT resources
@@ -133,7 +135,7 @@ func main() {
 	}
 
 	// Initialize node-specific key management
-	km := NewKeyManager(nodeIdentifier.String())
+	km = NewKeyManager(nodeIdentifier.String())
 	if err := km.GenerateKey(); err != nil {
 		fmt.Printf("Encryption initialization error: %v\n", err)
 		return
@@ -406,7 +408,6 @@ func StoreFile(filePath string, encrypted bool) (*NodeInfo, *big.Int, error) {
 	// Handle encryption if requested
 	if encrypted {
 		// Initialize key management for the current node
-		km := NewKeyManager(nodeID)
 		if err := km.GenerateKey(); err != nil {
 			return nil, nil, fmt.Errorf("failed to initialize encryption: %w", err)
 		}
@@ -1321,7 +1322,6 @@ func ReadNodeFile(nodeKey, fileKey string) ([]byte, error) {
 			return content, nil
 		}
 
-		km := NewKeyManager(currentNodeID)
 		fe := NewFileEncryptor(km)
 
 		// try decryption.

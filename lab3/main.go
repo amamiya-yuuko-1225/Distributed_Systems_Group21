@@ -44,6 +44,7 @@ const (
 )
 
 var km *KeyManager
+var fe *FileEncryptor
 
 // File system related constants
 const (
@@ -413,7 +414,10 @@ func StoreFile(filePath string, encrypted bool) (*NodeInfo, *big.Int, error) {
 		}
 
 		// Create encryptor and encrypt content
-		fe := NewFileEncryptor(km)
+		if fe == nil {
+			fe = NewFileEncryptor(km)
+		}
+
 		encryptedContent, err := fe.EncryptFile(content)
 		if err != nil {
 			return nil, nil, fmt.Errorf("encryption failed: %w", err)
@@ -1321,7 +1325,9 @@ func ReadNodeFile(nodeKey, fileKey string) ([]byte, error) {
 			return content, nil
 		}
 
-		fe := NewFileEncryptor(km)
+		if fe == nil {
+			fe = NewFileEncryptor(km)
+		}
 
 		// try decryption.
 		decryptedContent, err := fe.DecryptFile(fileContent.Content)

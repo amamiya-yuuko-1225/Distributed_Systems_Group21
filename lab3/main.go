@@ -1327,6 +1327,7 @@ func ReadNodeFile(nodeKey, fileKey string) ([]byte, error) {
 		// try decryption.
 		decryptedContent, err := fe.DecryptFile(fileContent.Content)
 		if err != nil {
+			fmt.Println("decryption failed", err)
 			return fileContent.Content, nil
 		}
 		return decryptedContent, nil

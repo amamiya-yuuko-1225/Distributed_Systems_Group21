@@ -1305,7 +1305,6 @@ func ReadFile(filePath string) ([]byte, error) {
 // Now checks only node-specific directories
 func ReadNodeFile(nodeKey, fileKey string) ([]byte, error) {
 	var currentNode = Get()
-	var currentNodeID = currentNode.Info.Identifier.String()
 
 	// Helper function to read and parse file content
 	readAndParseFile := func(path string) ([]byte, error) {
